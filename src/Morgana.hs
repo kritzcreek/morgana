@@ -10,13 +10,13 @@ module Morgana where
 
 import           Control.Lens hiding ((&))
 import           Control.Zipper
-import qualified Data.Text           as T
-import qualified Data.Text.IO as T
-import qualified Language.PureScript as P
 import           Network (listenOn, withSocketsDo, accept, PortID(..), Socket)
 import           Protolude
 import           System.IO (hSetBuffering, hFlush, BufferMode(..))
 import           Unsafe
+import qualified Data.Text           as T
+import qualified Data.Text.IO as T
+import qualified Language.PureScript as P
 
 data Match where
   DeclarationMatch :: P.SourceSpan -> P.Declaration -> Match
@@ -24,10 +24,19 @@ data Match where
   BinderMatch      :: P.SourceSpan -> P.Binder      -> Match
   deriving (Show)
 
-getSP :: Match -> P.SourceSpan
-getSP (DeclarationMatch sp _) = sp
-getSP (ExprMatch sp _) = sp
-getSP (BinderMatch sp _) = sp
+sourceSpan :: Lens Match Match P.SourceSpan P.SourceSpan
+sourceSpan = lens getSP setSP
+  where
+    getSP :: Match -> P.SourceSpan
+    getSP (DeclarationMatch sp _) = sp
+    getSP (ExprMatch sp _) = sp
+    getSP (BinderMatch sp _) = sp
+
+    setSP :: Match -> P.SourceSpan -> Match
+    setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
+    setSP (ExprMatch _ d) sp = ExprMatch sp d
+    setSP (BinderMatch _ d) sp = BinderMatch sp d
+
 
 getMatchType :: Match -> MatchType
 getMatchType m = case m of
@@ -41,10 +50,10 @@ data MatchType where
   deriving (Show, Eq)
 
 instance Eq Match where
-  (==) = (==) `on` getSP
+  (==) = (==) `on` view sourceSpan
 
 instance Ord Match where
-  compare = compare `on` getSP
+  compare = compare `on` view sourceSpan
 
 extractor :: P.SourcePos -> P.Declaration -> [Match]
 extractor sp = matcher
@@ -52,14 +61,14 @@ extractor sp = matcher
     (matcher, _, _, _, _) =
       P.everythingOnValues
       (<>)
-      (\case (P.PositionedDeclaration sourceSpan _ d) ->
-               [DeclarationMatch sourceSpan d | matches sp sourceSpan]
+      (\case (P.PositionedDeclaration sourceSpan' _ d) ->
+               [DeclarationMatch sourceSpan' d | matches sp sourceSpan']
              _ -> [])
-      (\case (P.PositionedValue sourceSpan _ e) ->
-               [ExprMatch sourceSpan e | matches sp sourceSpan]
+      (\case (P.PositionedValue sourceSpan' _ e) ->
+               [ExprMatch sourceSpan' e | matches sp sourceSpan']
              _ -> [])
-      (\case (P.PositionedBinder sourceSpan _ b) ->
-               [BinderMatch sourceSpan b | matches sp sourceSpan]
+      (\case (P.PositionedBinder sourceSpan' _ b) ->
+               [BinderMatch sourceSpan' b | matches sp sourceSpan']
              _ -> [])
       (const [])
       (const [])
@@ -73,7 +82,7 @@ slice t (P.SourceSpan _ (P.SourcePos l1 c1) (P.SourcePos l2 c2)) =
   in  T.drop (c1 - 1) l : fromMaybe [] (initMay ls) ++ maybeToList (T.take c2 <$> lastMay ls)
 
 fromRight :: Either a b -> b
-fromRight = fromJust . rightToMaybe
+fromRight = unsafeFromJust . rightToMaybe
 
 decls :: Text -> [P.Declaration]
 decls t = d
@@ -111,12 +120,11 @@ instance Respond Emacs where
   respond h r = case r of
     Message t ->
       liftIO (T.hPutStrLn h ("m: " <> t))
-    Span _ _ (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) ->
-      liftIO (T.hPutStrLn h ("s: " <> T.unwords (map show [x1, y1, x2, y2])))
+    Span matchType _ (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) ->
+      liftIO (T.hPutStrLn h ("s: " <> T.unwords (map show [x1, y1, x2, y2]) <> " " <> show matchType))
 
 class Monad m => Respond m where
   respond :: Handle -> Response -> m ()
-
 
 data Response
   = Message Text
@@ -157,6 +165,7 @@ commandProcessor h = do
             put (Selecting file' z)
             respond' h
       Just Narrow -> do
+        -- [match] <- uses (selectingMatches . focus . sourceSpan . Control.Lens.to pure) traceShowId
         selectingMatches %= tug rightward
         respond' h
       Just Widen -> do
@@ -167,19 +176,19 @@ commandProcessor h = do
   commandProcessor h
 
 slice' :: Zipper h i Match -> Text -> Text
-slice' z f = z ^. focus & getSP & slice f & T.unlines
+slice' z f = z ^. focus . sourceSpan & slice f & T.unlines
 
-respond' :: (MonadState SState m, MonadIO m, Respond m) => Handle -> m ()
+respond' :: (MonadState SState m, Respond m) => Handle -> m ()
 respond' h = do
   s <- get
   case s of
     Selecting file' selections ->
       let
         selection = selections ^. focus
-        sourceSpan = getSP selection
+        sp = selection ^. sourceSpan
         selectionType = getMatchType selection
       in
-        respond h (Span selectionType file' sourceSpan)
+        respond h (Span selectionType file' sp)
     Waiting -> respond h (Message "Gief me da file!")
 
 simpleParse :: Text -> Maybe Command

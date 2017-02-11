@@ -46,13 +46,16 @@
   (interactive)
   (morgana-send "n"))
 
+(setq morgana-overlay (make-overlay 0 0 (current-buffer)))
+
 (defun morgana-send-set (p)
   (let ((cmd (format
               "s %s %d %d"
               (f-this-file)
               (line-number-at-pos p)
               (save-excursion
-                (goto-char p) (current-column)))))
+                (goto-char p)
+                (+ 1 (current-column))))))
     (morgana-send cmd)))
 
 (defun morgana-send (cmd)
@@ -74,11 +77,20 @@
       ((string= type "m:") (message (s-chomp (s-join " " content))))
       ((string= type "s:") (morgana-select content)))))
 
+;; (defun morgana-select (x)
+;;   (evil-visual-select (pos-at-line-col (string-to-int (nth 0 x))
+;;                                        (string-to-int (nth 1 x)))
+;;                       (pos-at-line-col (string-to-int (nth 2 x))
+;;                                        (- (string-to-int (nth 3 x)) 1))))
 (defun morgana-select (x)
-  (evil-visual-select (pos-at-line-col (string-to-int (nth 0 x))
-                                       (string-to-int (nth 1 x)))
-                      (pos-at-line-col (string-to-int (nth 2 x))
-                                       (string-to-int (nth 3 x)))))
+  (overlay-put morgana-overlay 'face `(:background "red"))
+  (let ((beg (pos-at-line-col (string-to-int (nth 0 x))
+                              (string-to-int (nth 1 x))))
+        (end (pos-at-line-col (string-to-int (nth 2 x))
+                              (string-to-int (nth 3 x))))
+        (matchType (nth 4 x)))
+    (message matchType)
+    (move-overlay morgana-overlay beg end (current-buffer))))
 
 (defun pos-at-line-col (l c)
   (save-excursion
