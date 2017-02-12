@@ -37,8 +37,12 @@ resolver: lts-8.0
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - '.'
-- location: '../purescript'
+- location:
+   git: https://github.com/kRITZCREEK/purescript.git
+   commit: 99b869c568b1177a9b174bb0f6c48d12ceaa80ec
   extra-dep: true
+# - location: '../purescript'
+#   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
