@@ -105,6 +105,18 @@ isBehind x y = isBefore y x
 
 -- INTERPRETERS
 
+data Selecting =
+  Selecting
+    { _selectingFile :: Text
+    , _selectingMatches :: Top :>> [Match] :>> Match
+    }
+makeLenses ''Selecting
+
+data SState
+  = Waiting
+  | SelectingState Selecting
+
+makePrisms ''SState
 newtype Terminal a = Terminal { runTerminal :: StateT SState IO a }
   deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
 
@@ -120,8 +132,12 @@ instance Respond Emacs where
   respond h r = case r of
     Message t ->
       liftIO (T.hPutStrLn h ("m: " <> t))
-    Span matchType _ (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) ->
-      liftIO (T.hPutStrLn h ("s: " <> T.unwords (map show [x1, y1, x2, y2]) <> " " <> show matchType))
+    Span matchType _ ss ->
+      liftIO (T.hPutStrLn h ("s: " <> answerSS ss <> " " <> show matchType))
+    Spans sourceSpans ->
+      liftIO (T.hPutStrLn h ("ss: " <> foldMap answerSS sourceSpans))
+    where
+      answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2]) <> " "
 
 class Monad m => Respond m where
   respond :: Handle -> Response -> m ()
@@ -129,20 +145,13 @@ class Monad m => Respond m where
 data Response
   = Message Text
   | Span MatchType Text P.SourceSpan
-
-data SState
-  = Waiting
-  | Selecting
-    { _selectingFile :: Text
-    , _selectingMatches :: Top :>> [Match] :>> Match
-    }
-
-makeLenses ''SState
+  | Spans [P.SourceSpan]
 
 data Command
   = Pos Text Int Int
   | Widen
   | Narrow
+  | FindOccurences Text Int Int
 
 sockHandler :: (MonadState SState m, MonadIO m, Respond m) => Socket -> m ()
 sockHandler sock = do
@@ -162,18 +171,63 @@ commandProcessor h = do
             put Waiting
             respond h (Message "Didn't match")
           Just z -> do
-            put (Selecting file' z)
+            put (SelectingState (Selecting file' z))
             respond' h
       Just Narrow -> do
         -- [match] <- uses (selectingMatches . focus . sourceSpan . Control.Lens.to pure) traceShowId
-        selectingMatches %= tug rightward
+        _SelectingState.selectingMatches %= tug rightward
         respond' h
       Just Widen -> do
-        selectingMatches %= tug leftward
+        _SelectingState.selectingMatches %= tug leftward
         respond' h
+      Just (FindOccurences fp l c) -> do
+        file' <- liftIO (T.readFile (toS fp))
+        case zipper (allMatches file' l c) & within traverse <&> rightmost of
+          Nothing -> do
+            put Waiting
+            respond h (Message "Didn't match")
+          Just z -> do
+            let occurrences = evalState findOccurrences (Selecting file' z)
+            traceM "What?"
+            respond h (Spans occurrences)
       Nothing -> liftIO (T.hPutStrLn h "Parse failure")
   liftIO (hFlush h)
   commandProcessor h
+
+findOccurrences :: State Selecting [P.SourceSpan]
+findOccurrences = do
+  traceM "rofl"
+  selectionMaybe <- gets (view (selectingMatches . focus))
+  let i = case selectionMaybe of
+            BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
+            ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> ident
+            _ -> "NotFound"
+  traceM ("ident: " <> i)
+  selectingMatches %= leftmost
+  current <- gets (view (selectingMatches . focus))
+  traceShowM current
+  case current of
+    DeclarationMatch _ d ->
+      let x = traceShowId (extractOccurrences i d)
+      in pure x
+    _ ->
+      pure []
+
+extractOccurrences :: Text -> P.Declaration -> [P.SourceSpan]
+extractOccurrences ident = matcher
+  where
+    (matcher, _, _, _, _) =
+      P.everythingOnValues
+      (<>)
+      (const [])
+      (\case (P.PositionedValue sourceSpan' _ (P.Var (P.Qualified Nothing (P.Ident ident')))) ->
+               [sourceSpan' | ident == ident']
+             _ -> [])
+      (\case (P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident'))) ->
+               [sourceSpan' | ident == ident']
+             _ -> [])
+      (const [])
+      (const [])
 
 slice' :: Zipper h i Match -> Text -> Text
 slice' z f = z ^. focus . sourceSpan & slice f & T.unlines
@@ -182,13 +236,21 @@ respond' :: (MonadState SState m, Respond m) => Handle -> m ()
 respond' h = do
   s <- get
   case s of
-    Selecting file' selections ->
+    SelectingState (Selecting file' selections) ->
       let
         selection = selections ^. focus
         sp = selection ^. sourceSpan
         selectionType = getMatchType selection
       in
-        respond h (Span selectionType file' sp)
+        do
+          -- case selection of
+          --   BinderMatch _ binder ->
+          --     traceShowM binder
+          --   DeclarationMatch _ decl ->
+          --     traceShowM decl
+          --   ExprMatch _ expr ->
+          --     traceShowM expr
+          respond h (Span selectionType file' sp)
     Waiting -> respond h (Message "Gief me da file!")
 
 simpleParse :: Text -> Maybe Command
@@ -196,6 +258,7 @@ simpleParse t =
   case T.words t of
     ["w"] -> Just Widen
     ["n"] -> Just Narrow
+    ["o", fp, x, y] -> FindOccurences fp <$> readMaybe (toS x) <*> readMaybe (toS y)
     ["s", fp, x, y] -> Pos fp <$> readMaybe (toS x) <*> readMaybe (toS y)
     _ -> Nothing
 
@@ -205,7 +268,7 @@ main :: IO ()
 main = withSocketsDo $ do
     args <- getArgs
     let port = fromIntegral $ fromMaybe 5678 (readMaybe =<< headMay args :: Maybe Int)
-        isEmacs = args ^. ix 1 == "emacs"
+        isEmacs = True -- args ^. ix 1 == "emacs"
     sock <- listenOn $ PortNumber port
     putText $ "Listening on " <> show port
     void $ if isEmacs

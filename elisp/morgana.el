@@ -46,7 +46,34 @@
   (interactive)
   (morgana-send "n"))
 
+(defun morgana-occurrences ()
+  "Finds all occurrences for the current selection"
+  (interactive)
+  (let* ((p (point))
+         (cmd (format
+               "o %s %d %d"
+               (f-this-file)
+               (line-number-at-pos p)
+               (save-excursion
+                 (goto-char p)
+                 (+ 1 (current-column))))))
+    (morgana-send cmd)))
+
 (setq morgana-overlay (make-overlay 0 0 (current-buffer)))
+
+(setq morgana-occurrences-overlays '())
+(defun morgana-clear-occurrences ()
+  (-each morgana-occurrences-overlays 'delete-overlay))
+
+(defun morgana-add-occurrence (line1 column1 line2 column2)
+  (let ((o (make-overlay (pos-at-line-col line1 column1)
+                         (pos-at-line-col line2 column2)
+                         (current-buffer))))
+    (overlay-put o 'face `(:background "green"))
+    (push o morgana-occurrences-overlays)))
+
+(morgana-clear-occurrences)
+(morgana-add-occurrence 1 1 2 2)
 
 (defun morgana-send-set (p)
   (let ((cmd (format
@@ -75,14 +102,23 @@
          (content (cdr splitted)))
     (cond
       ((string= type "m:") (message (s-chomp (s-join " " content))))
-      ((string= type "s:") (morgana-select content)))))
+      ((string= type "s:") (morgana-select content))
+      ((string= type "ss:") (morgana-hl-occurences content)))))
 
-;; (defun morgana-select (x)
-;;   (evil-visual-select (pos-at-line-col (string-to-int (nth 0 x))
-;;                                        (string-to-int (nth 1 x)))
-;;                       (pos-at-line-col (string-to-int (nth 2 x))
-;;                                        (- (string-to-int (nth 3 x)) 1))))
+(defun morgana-hl-occurences (strings)
+  "Highlights the passed source positions"
+  (let* ((numbers (-map 'string-to-int strings))
+         (batchedNumbers (-partition-all 4 numbers)))
+    (print numbers)
+    (morgana-clear-occurrences)
+    (-each batchedNumbers (lambda (batch) (morgana-add-occurrence
+                                           (nth 0 batch)
+                                           (nth 1 batch)
+                                           (nth 2 batch)
+                                           (nth 3 batch))))))
+
 (defun morgana-select (x)
+  (message "hi")
   (overlay-put morgana-overlay 'face `(:background "red"))
   (let ((beg (pos-at-line-col (string-to-int (nth 0 x))
                               (string-to-int (nth 1 x))))
@@ -102,6 +138,7 @@
 (global-set-key (quote [f1]) 'morgana-set)
 (global-set-key (quote [f2]) 'morgana-widen)
 (global-set-key (quote [f3]) 'morgana-narrow)
+(global-set-key (quote [f4]) 'morgana-occurrences)
 
 (provide 'morgana)
 ;;; morgana.el ends here

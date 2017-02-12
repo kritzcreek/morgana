@@ -6,9 +6,12 @@ whatever :: Int
 
 whatever x = do
   hello + show x
-  hello again
+  hello again x
 
-  lol <- test
+  What (Just return) <- x test
+
+  -- x
+  x asd
 
   pure return
 
