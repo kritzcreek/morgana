@@ -195,14 +195,14 @@ commandProcessor h = do
 
 findOccurrences :: State Selecting [P.SourceSpan]
 findOccurrences = do
-  selectionMaybe <- gets (view (selectingMatches . focus))
+  selectionMaybe <- use (selectingMatches . focus)
   let i = case selectionMaybe of
             BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
             ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> ident
             _ -> "NotFound"
   traceM ("ident: " <> i)
   selectingMatches %= leftmost
-  current <- gets (view (selectingMatches . focus))
+  current <- use (selectingMatches . focus)
   traceShowM current
   case current of
     DeclarationMatch _ d ->
