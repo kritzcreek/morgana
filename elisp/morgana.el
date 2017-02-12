@@ -31,6 +31,13 @@
 (require 's)
 (require 'f)
 
+(defun pos-at-line-col (l c)
+  (save-excursion
+    (goto-char (point-min))
+    (goto-line l)
+    (move-to-column (- c 1))
+    (point)))
+
 (defun morgana-set ()
   "Starts a new selection at point"
   (interactive)
@@ -59,11 +66,13 @@
                  (+ 1 (current-column))))))
     (morgana-send cmd)))
 
-(setq morgana-overlay (make-overlay 0 0 (current-buffer)))
-
+(setq morgana-overlay
+      (make-overlay 0 0 (current-buffer)))
 (setq morgana-occurrences-overlays '())
+
 (defun morgana-clear-occurrences ()
-  (-each morgana-occurrences-overlays 'delete-overlay))
+  (-each morgana-occurrences-overlays 'delete-overlay)
+  (setq morgana-occurrences-overlays '()))
 
 (defun morgana-add-occurrence (line1 column1 line2 column2)
   (let ((o (make-overlay (pos-at-line-col line1 column1)
@@ -109,7 +118,6 @@
   "Highlights the passed source positions"
   (let* ((numbers (-map 'string-to-int strings))
          (batchedNumbers (-partition-all 4 numbers)))
-    (print numbers)
     (morgana-clear-occurrences)
     (-each batchedNumbers (lambda (batch) (morgana-add-occurrence
                                            (nth 0 batch)
@@ -127,13 +135,6 @@
         (matchType (nth 4 x)))
     (message matchType)
     (move-overlay morgana-overlay beg end (current-buffer))))
-
-(defun pos-at-line-col (l c)
-  (save-excursion
-    (goto-char (point-min))
-    (goto-line l)
-    (move-to-column (- c 1))
-    (point)))
 
 (global-set-key (quote [f1]) 'morgana-set)
 (global-set-key (quote [f2]) 'morgana-widen)

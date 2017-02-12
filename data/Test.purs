@@ -11,6 +11,8 @@ whatever x = do
   What (Just return) <- x test
 
   -- x
+  -- (delete-all-overlays)
+
   x asd
 
   pure return

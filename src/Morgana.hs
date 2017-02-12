@@ -135,9 +135,9 @@ instance Respond Emacs where
     Span matchType _ ss ->
       liftIO (T.hPutStrLn h ("s: " <> answerSS ss <> " " <> show matchType))
     Spans sourceSpans ->
-      liftIO (T.hPutStrLn h ("ss: " <> foldMap answerSS sourceSpans))
+      liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
     where
-      answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2]) <> " "
+      answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
 
 class Monad m => Respond m where
   respond :: Handle -> Response -> m ()
@@ -188,7 +188,6 @@ commandProcessor h = do
             respond h (Message "Didn't match")
           Just z -> do
             let occurrences = evalState findOccurrences (Selecting file' z)
-            traceM "What?"
             respond h (Spans occurrences)
       Nothing -> liftIO (T.hPutStrLn h "Parse failure")
   liftIO (hFlush h)
@@ -196,7 +195,6 @@ commandProcessor h = do
 
 findOccurrences :: State Selecting [P.SourceSpan]
 findOccurrences = do
-  traceM "rofl"
   selectionMaybe <- gets (view (selectingMatches . focus))
   let i = case selectionMaybe of
             BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
