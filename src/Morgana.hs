@@ -19,9 +19,10 @@ import qualified Data.Text.IO as T
 import qualified Language.PureScript as P
 
 data Match where
-  DeclarationMatch :: P.SourceSpan -> P.Declaration -> Match
-  ExprMatch        :: P.SourceSpan -> P.Expr        -> Match
-  BinderMatch      :: P.SourceSpan -> P.Binder      -> Match
+  DeclarationMatch :: P.SourceSpan -> P.Declaration       -> Match
+  ExprMatch        :: P.SourceSpan -> P.Expr              -> Match
+  BinderMatch      :: P.SourceSpan -> P.Binder            -> Match
+  DoNotationMatch  :: P.SourceSpan -> P.DoNotationElement -> Match
   deriving (Show)
 
 sourceSpan :: Lens Match Match P.SourceSpan P.SourceSpan
@@ -31,23 +32,13 @@ sourceSpan = lens getSP setSP
     getSP (DeclarationMatch sp _) = sp
     getSP (ExprMatch sp _) = sp
     getSP (BinderMatch sp _) = sp
+    getSP (DoNotationMatch sp _) = sp
 
     setSP :: Match -> P.SourceSpan -> Match
     setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
     setSP (ExprMatch _ d) sp = ExprMatch sp d
     setSP (BinderMatch _ d) sp = BinderMatch sp d
-
-
-getMatchType :: Match -> MatchType
-getMatchType m = case m of
- DeclarationMatch _ _ -> Declaration
- ExprMatch _ _ -> Expression
- BinderMatch _ _ -> Expression
-
-data MatchType where
-  Expression :: MatchType
-  Declaration :: MatchType
-  deriving (Show, Eq)
+    setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
 
 instance Eq Match where
   (==) = (==) `on` view sourceSpan
@@ -71,7 +62,9 @@ extractor sp = matcher
                [BinderMatch sourceSpan' b | matches sp sourceSpan']
              _ -> [])
       (const [])
-      (const [])
+      (\case (P.PositionedDoNotationElement sourceSpan' _ dne) ->
+               [DoNotationMatch sourceSpan' dne | matches sp sourceSpan']
+             _ -> [])
 
 allMatches :: Text -> Int -> Int -> [Match]
 allMatches t l c = concatMap (extractor (P.SourcePos l c)) (decls t)
@@ -122,7 +115,7 @@ newtype Terminal a = Terminal { runTerminal :: StateT SState IO a }
 
 instance Respond Terminal where
   respond h (Message t) = liftIO (T.hPutStrLn h ("Message: " <> t))
-  respond h (Span _ f sp) =
+  respond h (Span f sp) =
     liftIO (T.hPutStrLn h (T.unlines (slice f sp)))
 
 newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
@@ -132,8 +125,8 @@ instance Respond Emacs where
   respond h r = case r of
     Message t ->
       liftIO (T.hPutStrLn h ("m: " <> t))
-    Span matchType _ ss ->
-      liftIO (T.hPutStrLn h ("s: " <> answerSS ss <> " " <> show matchType))
+    Span _ ss ->
+      liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
     Spans sourceSpans ->
       liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
     where
@@ -144,7 +137,7 @@ class Monad m => Respond m where
 
 data Response
   = Message Text
-  | Span MatchType Text P.SourceSpan
+  | Span Text P.SourceSpan
   | Spans [P.SourceSpan]
 
 data Command
@@ -236,19 +229,19 @@ respond' h = do
   case s of
     SelectingState (Selecting file' selections) ->
       let
-        selection = selections ^. focus
-        sp = selection ^. sourceSpan
-        selectionType = getMatchType selection
+        sp = selections^.focus.sourceSpan
       in
         do
-          -- case selection of
-          --   BinderMatch _ binder ->
-          --     traceShowM binder
-          --   DeclarationMatch _ decl ->
-          --     traceShowM decl
-          --   ExprMatch _ expr ->
-          --     traceShowM expr
-          respond h (Span selectionType file' sp)
+          case selections^.focus of
+            BinderMatch _ binder ->
+              traceShowM binder
+            DeclarationMatch _ decl ->
+              traceShowM decl
+            ExprMatch _ expr ->
+              traceShowM expr
+            DoNotationMatch _ expr ->
+              traceShowM expr
+          respond h (Span file' sp)
     Waiting -> respond h (Message "Gief me da file!")
 
 simpleParse :: Text -> Maybe Command

@@ -131,9 +131,7 @@
   (let ((beg (pos-at-line-col (string-to-int (nth 0 x))
                               (string-to-int (nth 1 x))))
         (end (pos-at-line-col (string-to-int (nth 2 x))
-                              (string-to-int (nth 3 x))))
-        (matchType (nth 4 x)))
-    (message matchType)
+                              (string-to-int (nth 3 x)))))
     (move-overlay morgana-overlay beg end (current-buffer))))
 
 (global-set-key (quote [f1]) 'morgana-set)
