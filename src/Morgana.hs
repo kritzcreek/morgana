@@ -66,8 +66,8 @@ extractor sp = matcher
                [DoNotationMatch sourceSpan' dne | matches sp sourceSpan']
              _ -> [])
 
-allMatches :: Text -> Int -> Int -> [Match]
-allMatches t l c = concatMap (extractor (P.SourcePos l c)) (decls t)
+allMatches :: P.Module -> Int -> Int -> [Match]
+allMatches (P.Module _ _ _ d _) l c = concatMap (extractor (P.SourcePos l c)) d
 
 slice :: Text -> P.SourceSpan -> [Text]
 slice t (P.SourceSpan _ (P.SourcePos l1 c1) (P.SourcePos l2 c2)) =
@@ -77,10 +77,8 @@ slice t (P.SourceSpan _ (P.SourcePos l1 c1) (P.SourcePos l2 c2)) =
 fromRight :: Either a b -> b
 fromRight = unsafeFromJust . rightToMaybe
 
-decls :: Text -> [P.Declaration]
-decls t = d
-  where
-    P.Module _ _ _ d _ = snd . fromRight $ P.parseModuleFromFile identity ("hi", toS t)
+unsafeParseModule :: Text -> P.Module
+unsafeParseModule t = snd . fromRight $ P.parseModuleFromFile identity ("hi", toS t)
 
 matches :: P.SourcePos -> P.SourceSpan -> Bool
 matches pos (P.SourceSpan _ start end)
@@ -100,7 +98,8 @@ isBehind x y = isBefore y x
 
 data Selecting =
   Selecting
-    { _selectingFile :: Text
+    { _selectingFile    :: Text
+    , _selectingModule  :: P.Module
     , _selectingMatches :: Top :>> [Match] :>> Match
     }
 makeLenses ''Selecting
@@ -159,12 +158,13 @@ commandProcessor h = do
   case simpleParse line of
       Just (Pos fp l c) -> do
         file' <- liftIO (T.readFile (toS fp))
-        case zipper (allMatches file' l c) & within traverse <&> rightmost of
+        let modul = unsafeParseModule file'
+        case zipper (allMatches modul l c) & within traverse <&> rightmost of
           Nothing -> do
             put Waiting
             respond h (Message "Didn't match")
           Just z -> do
-            put (SelectingState (Selecting file' z))
+            put (SelectingState (Selecting file' modul z))
             respond' h
       Just Narrow -> do
         -- [match] <- uses (selectingMatches . focus . sourceSpan . Control.Lens.to pure) traceShowId
@@ -175,12 +175,13 @@ commandProcessor h = do
         respond' h
       Just (FindOccurences fp l c) -> do
         file' <- liftIO (T.readFile (toS fp))
-        case zipper (allMatches file' l c) & within traverse <&> rightmost of
+        let modul = unsafeParseModule file'
+        case zipper (allMatches modul l c) & within traverse <&> rightmost of
           Nothing -> do
             put Waiting
             respond h (Message "Didn't match")
           Just z -> do
-            let occurrences = evalState findOccurrences (Selecting file' z)
+            let occurrences = evalState findOccurrences (Selecting file' modul z)
             respond h (Spans occurrences)
       Nothing -> liftIO (T.hPutStrLn h "Parse failure")
   liftIO (hFlush h)
@@ -210,7 +211,11 @@ isBoundAt :: Text -> P.Declaration -> [P.SourceSpan]
 isBoundAt ident decl = execState (matcher decl) []
   where
     (matcher, _, _) = P.everywhereOnValuesTopDownM
-      (pure)
+      (\case b@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
+               | ident == ident'-> modify (cons sourceSpan') $> b
+             -- (P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident'))) -> do
+             --   [sourceSpan' | ident == ident']
+             b -> pure b)
       (pure)
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
                | ident == ident'-> modify (cons sourceSpan') $> b
@@ -258,7 +263,7 @@ respond' :: (MonadState SState m, Respond m) => Handle -> m ()
 respond' h = do
   s <- get
   case s of
-    SelectingState (Selecting file' selections) ->
+    SelectingState (Selecting file' _ selections) ->
       let
         sp = selections^.focus.sourceSpan
       in
