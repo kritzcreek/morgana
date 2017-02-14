@@ -199,10 +199,38 @@ findOccurrences = do
   traceShowM current
   case current of
     DeclarationMatch _ d ->
-      let x = traceShowId (extractOccurrences i d)
+      let x = if isBoundIn i d
+              then isBoundAt i d -- traceShowId (extractOccurrences i d)
+              else []
       in pure x
     _ ->
       pure []
+
+isBoundAt :: Text -> P.Declaration -> [P.SourceSpan]
+isBoundAt ident decl = execState (matcher decl) []
+  where
+    (matcher, _, _) = P.everywhereOnValuesTopDownM
+      (pure)
+      (pure)
+      (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
+               | ident == ident'-> modify (cons sourceSpan') $> b
+             -- (P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident'))) -> do
+             --   [sourceSpan' | ident == ident']
+             b -> pure b)
+
+isBoundIn :: Text -> P.Declaration -> Bool
+isBoundIn ident =  not . null . matcher
+  where
+    (matcher, _, _, _, _) =
+      P.everythingOnValues
+      (<>)
+      (const [])
+      (const [])
+      (\case (P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident'))) ->
+               [sourceSpan' | ident == ident']
+             _ -> [])
+      (const [])
+      (const [])
 
 extractOccurrences :: Text -> P.Declaration -> [P.SourceSpan]
 extractOccurrences ident = matcher
@@ -219,6 +247,9 @@ extractOccurrences ident = matcher
              _ -> [])
       (const [])
       (const [])
+
+-- scoping :: P.Ident -> P.SourceSpan -> [Match] -> [P.SourceSpan]
+-- scoping ident ssp = _scoping
 
 slice' :: Zipper h i Match -> Text -> Text
 slice' z f = z ^. focus . sourceSpan & slice f & T.unlines

@@ -10,10 +10,12 @@ whatever x = do
   What (Just {hello, whatever: x}) <- x test
 
   -- x
-  x asd
   x {hello}
 
   pure return
+  where
+    X x = let x = x in x rofl
+    lol = let x = x in x asd
 
 asd = asdvfc
 
