@@ -108,22 +108,19 @@ makePrisms ''SState
 newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
   deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
 
-instance Respond Emacs where
-  respond h r = case r of
-    Message t ->
-      liftIO (T.hPutStrLn h ("m: " <> t))
-    Span _ ss ->
-      liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
-    Spans sourceSpans ->
-      liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
-    Edits edits ->
-      liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
-    where
-      answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
-      answerEdit (ss, text) = answerSS ss <> " " <> text
-
-class Monad m => Respond m where
-  respond :: Handle -> Response -> m ()
+respond :: (MonadIO m) => Handle -> Response -> m ()
+respond h r = case r of
+  Message t ->
+    liftIO (T.hPutStrLn h ("m: " <> t))
+  Span _ ss ->
+    liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
+  Spans sourceSpans ->
+    liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
+  Edits edits ->
+    liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
+  where
+    answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
+    answerEdit (ss, text) = answerSS ss <> " " <> text
 
 data Response
   = Message Text
@@ -137,13 +134,13 @@ data Command
   | Narrow
   | FindOccurences Text Int Int
 
-sockHandler :: (MonadState SState m, MonadIO m, Respond m) => Socket -> m ()
+sockHandler :: (MonadState SState m, MonadIO m) => Socket -> m ()
 sockHandler sock = do
   (h, _, _) <- liftIO (accept sock)
   liftIO (hSetBuffering h LineBuffering)
   commandProcessor h
 
-commandProcessor :: (MonadState SState m, MonadIO m, Respond m) => Handle -> m ()
+commandProcessor :: (MonadState SState m, MonadIO m) => Handle -> m ()
 commandProcessor h = do
   line <- liftIO (T.hGetLine h)
   liftIO (putText line)
@@ -245,7 +242,7 @@ extractOccurrences ident = matcher
       (const [])
       (const [])
 
-respond' :: (MonadState SState m, Respond m) => Handle -> m ()
+respond' :: (MonadState SState m, MonadIO m) => Handle -> m ()
 respond' h = do
   s <- get
   case s of
