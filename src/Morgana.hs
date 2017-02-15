@@ -1,6 +1,6 @@
 {-# LANGUAGE NoImplicitPrelude            #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE GADTs                        #-}
+{-# LANGUAGE LambdaCase                   #-}
 {-# LANGUAGE OverloadedStrings            #-}
 {-# LANGUAGE FlexibleContexts             #-}
 {-# LANGUAGE TypeOperators                #-}
@@ -25,7 +25,7 @@ data Match where
   DoNotationMatch  :: P.SourceSpan -> P.DoNotationElement -> Match
   deriving (Show)
 
-sourceSpan :: Lens Match Match P.SourceSpan P.SourceSpan
+sourceSpan :: Lens' Match P.SourceSpan
 sourceSpan = lens getSP setSP
   where
     getSP :: Match -> P.SourceSpan
@@ -69,11 +69,6 @@ extractor sp = matcher
 allMatches :: P.Module -> Int -> Int -> [Match]
 allMatches (P.Module _ _ _ d _) l c = concatMap (extractor (P.SourcePos l c)) d
 
-slice :: Text -> P.SourceSpan -> [Text]
-slice t (P.SourceSpan _ (P.SourcePos l1 c1) (P.SourcePos l2 c2)) =
-  let (l:ls) = take (l2 - l1 + 1) . drop (l1 - 1) $ T.lines t
-  in  T.drop (c1 - 1) l : fromMaybe [] (initMay ls) ++ maybeToList (T.take c2 <$> lastMay ls)
-
 fromRight :: Either a b -> b
 fromRight = unsafeFromJust . rightToMaybe
 
@@ -109,13 +104,6 @@ data SState
   | SelectingState Selecting
 
 makePrisms ''SState
-newtype Terminal a = Terminal { runTerminal :: StateT SState IO a }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
-
-instance Respond Terminal where
-  respond h (Message t) = liftIO (T.hPutStrLn h ("Message: " <> t))
-  respond h (Span f sp) =
-    liftIO (T.hPutStrLn h (T.unlines (slice f sp)))
 
 newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
   deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
@@ -128,8 +116,11 @@ instance Respond Emacs where
       liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
     Spans sourceSpans ->
       liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
+    Edits edits ->
+      liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
     where
       answerSS (P.SourceSpan _ (P.SourcePos x1 y1) (P.SourcePos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
+      answerEdit (ss, text) = answerSS ss <> " " <> text
 
 class Monad m => Respond m where
   respond :: Handle -> Response -> m ()
@@ -138,6 +129,7 @@ data Response
   = Message Text
   | Span Text P.SourceSpan
   | Spans [P.SourceSpan]
+  | Edits [(P.SourceSpan, Text)]
 
 data Command
   = Pos Text Int Int
@@ -253,12 +245,6 @@ extractOccurrences ident = matcher
       (const [])
       (const [])
 
--- scoping :: P.Ident -> P.SourceSpan -> [Match] -> [P.SourceSpan]
--- scoping ident ssp = _scoping
-
-slice' :: Zipper h i Match -> Text -> Text
-slice' z f = z ^. focus . sourceSpan & slice f & T.unlines
-
 respond' :: (MonadState SState m, Respond m) => Handle -> m ()
 respond' h = do
   s <- get
@@ -295,9 +281,6 @@ main :: IO ()
 main = withSocketsDo $ do
     args <- getArgs
     let port = fromIntegral $ fromMaybe 5678 (readMaybe =<< headMay args :: Maybe Int)
-        isEmacs = True -- args ^. ix 1 == "emacs"
     sock <- listenOn $ PortNumber port
     putText $ "Listening on " <> show port
-    void $ if isEmacs
-           then runStateT (runEmacs (forever (sockHandler sock))) Waiting
-           else runStateT (runTerminal (forever (sockHandler sock))) Waiting
+    void $ runStateT (runEmacs (forever (sockHandler sock))) Waiting
