@@ -95,9 +95,6 @@
     (overlay-put o 'face `(:background "green"))
     (push o morgana-occurrences-overlays)))
 
-(morgana-clear-occurrences)
-(morgana-add-occurrence 1 1 2 2)
-
 (defun morgana-send-set (p)
   (let ((cmd (format
               "s %s %d %d"
