@@ -3,21 +3,28 @@ module MorganaTest where
 hello = 1 + 2
 
 whatever :: Int
-whatever x = do
-  hello + show x
-  hello again x
+whatever (Just {hello, whatever: x}) =
+   do hello x x + show x
+      hello x x
 
-  What (Just {hello, whatever: x}) <- x test
+      rofl <- x test
 
-  -- x
-  x {hello}
+      -- x
+      x {hello}
 
-  pure return
-  where
-    X x = let x = x in x rofl
-    lol = let x = x in x asd
+      pure {x: x}
+      where
+        X q = let a = b in b rofl
+        lol = let c = v in v asd
+
+
+double :: Int -> Int -> Int
+double x = x + x
+
+
+
+
 
 asd = asdvfc
-
 
   -- (delete-all-overlays)

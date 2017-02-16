@@ -34,7 +34,7 @@ executable mor
   build-depends:       base
                      , morgana
                      , protolude
-                     , purescript >= 0.9.1
+                     , purescript
                      , text
                      , network
                      , zippers

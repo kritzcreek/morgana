@@ -66,6 +66,20 @@
                  (+ 1 (current-column))))))
     (morgana-send cmd)))
 
+(defun morgana-rename (newName)
+  "Renames all occurrences for the current selection"
+  (interactive "SNew Name: ")
+  (let* ((p (point))
+         (cmd (format
+               "r %s %d %d %s"
+               (f-this-file)
+               (line-number-at-pos p)
+               (save-excursion
+                 (goto-char p)
+                 (+ 1 (current-column)))
+               newName)))
+    (morgana-send cmd)))
+
 (setq morgana-overlay
       (make-overlay 0 0 (current-buffer)))
 (setq morgana-occurrences-overlays '())
@@ -106,13 +120,14 @@
   (process-send-string (get-process "morgana") (s-prepend cmd "\n")))
 
 (defun morgana-process-filter (proc output)
-  (let* ((splitted (s-split " " output))
+  (let* ((splitted (s-split " " (s-chomp output)))
          (type (car splitted))
          (content (cdr splitted)))
     (cond
-      ((string= type "m:") (message (s-chomp (s-join " " content))))
+      ((string= type "m:") (message (s-join " " content)))
       ((string= type "s:") (morgana-select content))
-      ((string= type "ss:") (morgana-hl-occurences content)))))
+      ((string= type "ss:") (morgana-hl-occurences content))
+      ((string= type "ed:") (morgana-apply-edits content)))))
 
 (defun morgana-hl-occurences (strings)
   "Highlights the passed source positions"
@@ -124,6 +139,24 @@
                                            (nth 1 batch)
                                            (nth 2 batch)
                                            (nth 3 batch))))))
+(defun morgana-apply-edits (edits)
+  "Applies a series of edits to the current buffer"
+  (let* ((batchedNumbers (-partition-all 5 edits)))
+    (morgana-clear-occurrences)
+    (-each batchedNumbers (lambda (batch) (morgana-apply-edit
+                                           (string-to-int (nth 0 batch))
+                                           (string-to-int (nth 1 batch))
+                                           (string-to-int (nth 2 batch))
+                                           (string-to-int (nth 3 batch))
+                                           (nth 4 batch))))))
+
+(defun morgana-apply-edit (c1 l1 c2 l2 newText)
+  "Applies an edit to a source span"
+  (message "%i:%i %i:%i -> %s" c1 l1 c2 l2 newText)
+  (save-excursion
+    (goto-char (pos-at-line-col c1 l1))
+    (delete-region (pos-at-line-col c1 l1) (pos-at-line-col c2 l2))
+    (insert newText)))
 
 (defun morgana-select (x)
   (message "hi")
@@ -138,6 +171,7 @@
 (global-set-key (quote [f2]) 'morgana-widen)
 (global-set-key (quote [f3]) 'morgana-narrow)
 (global-set-key (quote [f4]) 'morgana-occurrences)
+(global-set-key (quote [f5]) 'morgana-rename)
 
 (provide 'morgana)
 ;;; morgana.el ends here
