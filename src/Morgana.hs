@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE NoImplicitPrelude          #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE LambdaCase                 #-}
@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeOperators              #-}
 {-# LANGUAGE TemplateHaskell            #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RankNTypes                 #-}
 module Morgana where
 
 import           Control.Lens
@@ -47,8 +48,11 @@ startColumn = ssStart.spColumn
 endLine = ssEnd.spLine
 endColumn = ssEnd.spColumn
 
-onColumns :: (Int -> Int) -> SSpan -> SSpan
-onColumns f span = span & startColumn %~ f & endColumn %~ f
+fields2 :: Lens' s a -> Lens' s a -> Traversal' s a
+fields2 f1 f2 f s = (\v1 v2 -> s & f1 .~ v1 & f2 .~ v2) <$> f (s ^. f1) <*> f (s ^. f2)
+
+columns :: Traversal' SSpan Int
+columns = fields2 startColumn endColumn
 
 instance Ord SSpan where
   compare s1 s2
@@ -129,14 +133,13 @@ matches pos span =
   in
     span'^.ssStart <= pos' && pos' <= span'^.ssEnd
 
--- INTERPRETERS
-
 data Selecting =
   Selecting
     { _selectingFile    :: Text
     , _selectingModule  :: P.Module
     , _selectingMatches :: Top :>> [Match] :>> Match
     }
+
 makeLenses ''Selecting
 
 data SState
@@ -239,7 +242,7 @@ computeChangeset :: Text -> [SSpan] -> [(SSpan, Text)]
 computeChangeset newText spans =
   List.groupBy ((==) `on` view startLine) spans
   <&> sortOn (view ssStart)
-  <&> snd . List.mapAccumL (\offset next -> (offset + characterDifference next, onColumns (+ offset) next)) 0
+  <&> snd . List.mapAccumL (\offset next -> (offset + characterDifference next, next & columns +~ offset)) 0
   & fold
   <&> (, newText)
   where
@@ -263,7 +266,9 @@ isBoundIn ident =  not . null . matcher
     (matcher, _, _, _, _) =
       P.everythingOnValues
       (<>)
-      (const [])
+      (\case (P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _)) ->
+               [sourceSpan' | ident == ident']
+             _ -> [])
       (const [])
       (\case (P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident'))) ->
                [sourceSpan' | ident == ident']
@@ -277,7 +282,9 @@ findOccurrences ident = matcher
     (matcher, _, _, _, _) =
       P.everythingOnValues
       (<>)
-      (const [])
+      (\case (P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _)) ->
+               [let s = sourceSpan'^.convertSpan in s & endColumn .~ (s^.startColumn + T.length ident') | ident == ident']
+             _ -> [])
       (\case (P.PositionedValue sourceSpan' _ (P.Var (P.Qualified Nothing (P.Ident ident')))) ->
                [sourceSpan'^.convertSpan | ident == ident']
              _ -> [])
