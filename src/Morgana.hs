@@ -47,6 +47,7 @@ startColumn = ssStart.spColumn
 endLine = ssEnd.spLine
 endColumn = ssEnd.spColumn
 
+onColumns :: (Int -> Int) -> SSpan -> SSpan
 onColumns f span = span & startColumn %~ f & endColumn %~ f
 
 instance Ord SSpan where
@@ -70,8 +71,8 @@ convertSpan =
   (\(P.SourceSpan fn start end) -> (SSpan (T.pack fn) (start^.convertPos) (end^.convertPos)))
   (\(SSpan fn start end) -> P.SourceSpan (toS fn) (start^. from convertPos) (end^. from convertPos))
 
-sourceSpan :: Lens' Match SSpan
-sourceSpan = lens getSP setSP
+matchSpan :: Lens' Match SSpan
+matchSpan = lens getSP setSP
   where
     getSP :: Match -> SSpan
     getSP (DeclarationMatch sp _) = sp
@@ -86,10 +87,10 @@ sourceSpan = lens getSP setSP
     setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
 
 instance Eq Match where
-  (==) = (==) `on` view sourceSpan
+  (==) = (==) `on` view matchSpan
 
 instance Ord Match where
-  compare = compare `on` view sourceSpan
+  compare = compare `on` view matchSpan
 
 extractor :: P.SourcePos -> P.Declaration -> [Match]
 extractor sp = matcher
@@ -147,8 +148,8 @@ makePrisms ''SState
 newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
   deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
 
-respond :: (MonadIO m) => Handle -> Response -> m ()
-respond h r = case r of
+respond' :: (MonadIO m) => Handle -> Response -> m ()
+respond' h r = case r of
   Message t ->
     liftIO (T.hPutStrLn h ("m: " <> t))
   Span _ ss ->
@@ -174,60 +175,48 @@ data Command
   | FindOccurrences Text Int Int
   | Rename Text Int Int Text
 
-sockHandler :: (MonadState SState m, MonadIO m) => Socket -> m ()
-sockHandler sock = do
-  (h, _, _) <- liftIO (accept sock)
-  liftIO (hSetBuffering h LineBuffering)
-  commandProcessor h
+commandProcessor :: (MonadState SState m, MonadIO m) => Command -> (Response -> m ()) -> m ()
+commandProcessor command respond = case command of
+  Pos fp l c -> do
+    file' <- liftIO (T.readFile (toS fp))
+    let modul = unsafeParseModule file'
+    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+      Nothing -> do
+        put Waiting
+        respond (Message "Didn't match")
+      Just z -> do
+        put (SelectingState (Selecting file' modul z))
+        respond =<< respondSpan
+  Narrow -> do
+    -- [match] <- uses (selectingMatches . focus . matchSpan . Control.Lens.to pure) traceShowId
+    _SelectingState.selectingMatches %= tug rightward
+    respond =<< respondSpan
+  Widen -> do
+    _SelectingState.selectingMatches %= tug leftward
+    respond =<< respondSpan
+  FindOccurrences fp l c -> do
+    file' <- liftIO (T.readFile (toS fp))
+    let modul = unsafeParseModule file'
+    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+      Nothing -> do
+        put Waiting
+        respond (Message "Didn't match")
+      Just z -> do
+        let occurrences = selectingFindOccurrences (Selecting file' modul z)
+        respond (Spans occurrences)
+  Rename fp l c newName -> do
+    file' <- liftIO (T.readFile (toS fp))
+    let modul = unsafeParseModule file'
+    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+      Nothing -> do
+        put Waiting
+        respond (Message "Didn't match")
+      Just z -> do
+        let occurrences = selectingFindOccurrences (Selecting file' modul z)
+        respond (Edits (computeChangeset newName occurrences))
 
-commandProcessor :: (MonadState SState m, MonadIO m) => Handle -> m ()
-commandProcessor h = do
-  line <- liftIO (T.hGetLine h)
-  liftIO (putText line)
-  case simpleParse line of
-      Just (Pos fp l c) -> do
-        file' <- liftIO (T.readFile (toS fp))
-        let modul = unsafeParseModule file'
-        case zipper (allMatches modul l c) & within traverse <&> rightmost of
-          Nothing -> do
-            put Waiting
-            respond h (Message "Didn't match")
-          Just z -> do
-            put (SelectingState (Selecting file' modul z))
-            respond' h
-      Just Narrow -> do
-        -- [match] <- uses (selectingMatches . focus . sourceSpan . Control.Lens.to pure) traceShowId
-        _SelectingState.selectingMatches %= tug rightward
-        respond' h
-      Just Widen -> do
-        _SelectingState.selectingMatches %= tug leftward
-        respond' h
-      Just (FindOccurrences fp l c) -> do
-        file' <- liftIO (T.readFile (toS fp))
-        let modul = unsafeParseModule file'
-        case zipper (allMatches modul l c) & within traverse <&> rightmost of
-          Nothing -> do
-            put Waiting
-            respond h (Message "Didn't match")
-          Just z -> do
-            let occurrences = evalState findOccurrences (Selecting file' modul z)
-            respond h (Spans occurrences)
-      Just (Rename fp l c newName) -> do
-        file' <- liftIO (T.readFile (toS fp))
-        let modul = unsafeParseModule file'
-        case zipper (allMatches modul l c) & within traverse <&> rightmost of
-          Nothing -> do
-            put Waiting
-            respond h (Message "Didn't match")
-          Just z -> do
-            let occurrences = evalState findOccurrences (Selecting file' modul z)
-            respond h (Edits (computeChangeset newName occurrences))
-      Nothing -> liftIO (T.hPutStrLn h "Parse failure")
-  liftIO (hFlush h)
-  commandProcessor h
-
-findOccurrences :: State Selecting [SSpan]
-findOccurrences = do
+selectingFindOccurrences :: Selecting -> [SSpan]
+selectingFindOccurrences selecting = flip evalState selecting $ do
   selectionMaybe <- use (selectingMatches . focus)
   let i = case selectionMaybe of
             BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
@@ -240,7 +229,7 @@ findOccurrences = do
   case current of
     DeclarationMatch _ d ->
       let x = if isBoundIn i d
-              then extractOccurrences i d
+              then findOccurrences i d
               else []
       in pure x
     _ ->
@@ -250,19 +239,20 @@ computeChangeset :: Text -> [SSpan] -> [(SSpan, Text)]
 computeChangeset newText spans =
   List.groupBy ((==) `on` view startLine) spans
   <&> sortOn (view ssStart)
-  & foldMap (\xs -> (, newText) <$> snd (List.mapAccumL (\offset next ->
-                                                           ( T.length newText - (next^.endColumn - next^.startColumn) + offset
-                                                           , onColumns (+ offset) next
-                                                           )) 0 xs))
+  <&> snd . List.mapAccumL (\offset next -> (offset + characterDifference next, onColumns (+ offset) next)) 0
+  & fold
+  <&> (, newText)
+  where
+    characterDifference span =  T.length newText - (span^.endColumn - span^.startColumn)
 
-isBoundAt :: Text -> P.Declaration -> [SSpan]
-isBoundAt ident decl = execState (matcher decl) []
+findBindersFor :: Text -> P.Declaration -> [SSpan]
+findBindersFor ident decl = execState (matcher decl) []
   where
     (matcher, _, _) = P.everywhereOnValuesTopDownM
       (\case b@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
-      (pure)
+      pure
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
@@ -281,8 +271,8 @@ isBoundIn ident =  not . null . matcher
       (const [])
       (const [])
 
-extractOccurrences :: Text -> P.Declaration -> [SSpan]
-extractOccurrences ident = matcher
+findOccurrences :: Text -> P.Declaration -> [SSpan]
+findOccurrences ident = matcher
   where
     (matcher, _, _, _, _) =
       P.everythingOnValues
@@ -297,13 +287,13 @@ extractOccurrences ident = matcher
       (const [])
       (const [])
 
-respond' :: (MonadState SState m, MonadIO m) => Handle -> m ()
-respond' h = do
+respondSpan :: (MonadState SState m, MonadIO m) => m Response
+respondSpan = do
   s <- get
   case s of
     SelectingState (Selecting file' _ selections) ->
       let
-        sp = selections^.focus.sourceSpan
+        sp = selections^.focus.matchSpan
       in
         do
           case selections^.focus of
@@ -315,8 +305,23 @@ respond' h = do
               traceShowM expr
             DoNotationMatch _ expr ->
               traceShowM expr
-          respond h (Span file' sp)
-    Waiting -> respond h (Message "Gief me da file!")
+          pure (Span file' sp)
+    Waiting ->
+      pure (Message "Gief me da file!")
+
+sockHandler :: (MonadState SState m, MonadIO m) => Socket -> m ()
+sockHandler sock = do
+  (h, _, _) <- liftIO (accept sock)
+  liftIO (hSetBuffering h LineBuffering)
+  forever $ do
+    line <- liftIO (T.hGetLine h)
+    case simpleParse line of
+      Just command ->
+        commandProcessor command (respond' h)
+      Nothing ->
+        liftIO (T.hPutStrLn h "Parse failure")
+    liftIO (putText line)
+    liftIO (hFlush h)
 
 simpleParse :: Text -> Maybe Command
 simpleParse t =
