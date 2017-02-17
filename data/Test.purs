@@ -11,19 +11,56 @@ whatever (Just {hello, whatever: x}) =
 
       -- x
       x {hello}
+      lol
 
       pure {x: x}
       where
         X q = let a = b in b rofl
-        lol = let c = v in v asd
-
+        lol = x
 
 double :: Int -> Int -> Int
 double x = x + x
 
+declarationLevelBinder x = x
 
+declarationLevelPattern (X x) = x
 
+letBinder y =
+  let
+    x = y
+  in
+    x
 
+whereBinder y = x
+  where
+    x = y
+
+wherePattern y = x
+  where
+    (X x) = y
+
+caseBinder = case _ of
+  x -> x
+
+casePattern = case _ of
+  X x -> x
+
+doBinder = do
+  x <- y
+  x
+
+doPattern = do
+  X x <- y
+  x
+
+lambdaBinder = \x -> x
+
+lambdaPattern = \(X x) -> x
+
+caseLetNestedBinder = case _ of
+  X x ->
+    let x = y in x
+  x -> x
 
 asd = asdvfc
 
