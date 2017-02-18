@@ -53,7 +53,7 @@ doPattern = do
   X x <- y
   x
 
-lambdaBinder = \x -> x
+lambdaBinder = \x -> \x -> x
 
 lambdaPattern = \(X x) -> x
 
