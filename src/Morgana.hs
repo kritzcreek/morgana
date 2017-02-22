@@ -210,7 +210,7 @@ commandProcessor command respond = case command of
         put Waiting
         respond (Message "Didn't match")
       Just z -> do
-        let occurrences = selectingFindOccurrences file (Selecting file modul z)
+        let occurrences = selectingFindOccurrences (Selecting file modul z)
         respond (Spans occurrences)
   Rename fp l c newName -> do
     file <- liftIO (T.readFile (toS fp))
@@ -220,11 +220,11 @@ commandProcessor command respond = case command of
         put Waiting
         respond (Message "Didn't match")
       Just z -> do
-        let occurrences = selectingFindOccurrences file (Selecting file modul z)
+        let occurrences = selectingFindOccurrences (Selecting file modul z)
         respond (Edits (computeChangeset newName occurrences))
 
-selectingFindOccurrences :: File -> Selecting -> [SSpan]
-selectingFindOccurrences file selecting = flip evalState selecting $ do
+selectingFindOccurrences :: Selecting -> [SSpan]
+selectingFindOccurrences selecting = flip evalState selecting $ do
   selectionMaybe <- use (selectingMatches . focus)
   let i = case selectionMaybe of
             BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
@@ -236,8 +236,8 @@ selectingFindOccurrences file selecting = flip evalState selecting $ do
   traceShowM current
   case current of
     DeclarationMatch _ d ->
-      let x = if isBoundIn file i d
-              then findLocalOccurences i d
+      let x = if isBoundIn i d
+              then findOccurrences i d
               else findOccurrences i d
       in pure x
     _ ->
@@ -253,43 +253,20 @@ computeChangeset newText spans =
   where
     characterDifference span =  T.length newText - (span^.endColumn - span^.startColumn)
 
-findBindersFor :: File -> Text -> P.Declaration -> [SSpan]
-findBindersFor file ident decl = execState (matcher decl) []
+findBindersFor :: Text -> P.Declaration -> [SSpan]
+findBindersFor ident decl = execState (matcher decl) []
   where
     (matcher, _, _) = P.everywhereOnValuesTopDownM
       (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> d
              d -> pure d)
-      (\case e@(P.PositionedValue sourceSpan' _ (P.Abs (Left (P.Ident ident')) _))
-               | ident == ident'-> modify (cons (parseAbsBinderSSpan file (sourceSpan'^.convertSpan))) $> e
-             e -> pure e)
+      pure
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
 
-
--- TODO: This just acts like there are only lambdas with a single Ident
-parseAbsBinderSSpan :: Text -> SSpan -> SSpan
-parseAbsBinderSSpan file span =
-  let
-    slice =
-      T.lines file
-      & drop (span^.startLine - 1)
-      & take (span^.endLine - span^.startLine + 1)
-      & ix 0 %~ T.drop (span^.startColumn - 1)
-      & ix (span^.endLine - span^.startLine) %~ T.take (span^.endColumn)
-    tokens = fromRight (P.lex "morgana" (T.unlines slice))
-    P.PositionedToken startPos endPos _ _ _ = tokens ^?! ix 1
-    sspan =
-      SSpan "<morgana>" (P.toSourcePos startPos^.convertPos) (P.toSourcePos endPos^.convertPos)
-      & lines +~ (span^.startLine - 1)
-  in
-     if sspan^.startLine == span^.startLine
-     then sspan & columns +~ (span^.startColumn - 1)
-     else sspan
-
-isBoundIn :: File -> Text -> P.Declaration -> Bool
-isBoundIn file ident =  not . null . findBindersFor file ident
+isBoundIn :: Text -> P.Declaration -> Bool
+isBoundIn ident = not . null . findBindersFor ident
 
 findOccurrences :: Text -> P.Declaration -> [SSpan]
 findOccurrences ident = matcher
