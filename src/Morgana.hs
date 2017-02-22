@@ -254,9 +254,9 @@ computeChangeset newText spans =
     characterDifference span =  T.length newText - (span^.endColumn - span^.startColumn)
 
 findBindersFor :: Text -> P.Declaration -> [SSpan]
-findBindersFor ident decl = execState (matcher decl) []
+findBindersFor ident decl = execState (matcherDecl decl) []
   where
-    (matcher, _, _) = P.everywhereOnValuesTopDownM
+    (matcherDecl, _, _) = P.everywhereOnValuesTopDownM
       (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> d
              d -> pure d)
@@ -264,6 +264,38 @@ findBindersFor ident decl = execState (matcher decl) []
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
+
+findBindersForInBinder :: Text -> P.Binder -> [SSpan]
+findBindersForInBinder ident binder = execState (matcherBinder binder) []
+  where
+    (_, _, matcherBinder) = P.everywhereOnValuesTopDownM
+      (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
+               | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> d
+             d -> pure d)
+      pure
+      (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
+               | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
+             b -> pure b)
+
+isBoundInMatch :: Text -> Match -> Maybe SSpan
+isBoundInMatch i m = case m of
+  DeclarationMatch s decl -> case decl of
+    P.ValueDeclaration (P.Ident ident ) _ _ _
+      | ident == i -> Just (s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i))
+    P.BoundValueDeclaration binder _ ->
+      listToMaybe (findBindersForInBinder i binder)
+    P.PositionedDeclaration sspan _ d ->
+      isBoundInMatch i (DeclarationMatch (sspan^.convertSpan) d)
+    _ -> Nothing
+  ExprMatch s expr -> case expr of
+    P.Abs binder _ ->
+      listToMaybe (findBindersForInBinder i binder)
+    P.Let decls _ ->
+      listToMaybe (mapMaybe (isValueDecl i) decls)
+
+isValueDecl :: Text -> P.Declaration -> Maybe SSpan
+isValueDecl ident (P.PositionedDeclaration ss (P.ValueDeclaration i _)) | i == ident = Just (ss^.convertSpan)
+isValueDecl _ _ = Nothing
 
 isBoundIn :: Text -> P.Declaration -> Bool
 isBoundIn ident = not . null . findBindersFor ident
