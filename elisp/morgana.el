@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'dash)
+(require 'ov)
 (require 's)
 (require 'f)
 
@@ -81,18 +82,19 @@
     (morgana-send cmd)))
 
 (setq morgana-overlay
-      (make-overlay 0 0 (current-buffer)))
+      (ov-make 0 0 (current-buffer)))
 (setq morgana-occurrences-overlays '())
 
 (defun morgana-clear-occurrences ()
   (-each morgana-occurrences-overlays 'delete-overlay)
   (setq morgana-occurrences-overlays '()))
+  ;; (ov-reset 'morgana-occurrences-overlays))
 
 (defun morgana-add-occurrence (line1 column1 line2 column2)
-  (let ((o (make-overlay (pos-at-line-col line1 column1)
-                         (pos-at-line-col line2 column2)
-                         (current-buffer))))
-    (overlay-put o 'face `(:background "green"))
+  (let ((o (ov-make (pos-at-line-col line1 column1)
+                    (pos-at-line-col line2 column2)
+                    (current-buffer))))
+    (ov-set o 'face `(:background "green"))
     (push o morgana-occurrences-overlays)))
 
 (defun morgana-send-set (p)
@@ -157,12 +159,12 @@
 
 (defun morgana-select (x)
   (message "hi")
-  (overlay-put morgana-overlay 'face `(:background "red"))
+  (ov-set morgana-overlay 'face `(:background "red"))
   (let ((beg (pos-at-line-col (string-to-int (nth 0 x))
                               (string-to-int (nth 1 x))))
         (end (pos-at-line-col (string-to-int (nth 2 x))
                               (string-to-int (nth 3 x)))))
-    (move-overlay morgana-overlay beg end (current-buffer))))
+    (ov-move morgana-overlay beg end (current-buffer))))
 
 (global-set-key (quote [f1]) 'morgana-set)
 (global-set-key (quote [f2]) 'morgana-widen)

@@ -28,6 +28,26 @@ data Match where
   DoNotationMatch  :: SSpan -> P.DoNotationElement -> Match
   deriving (Show)
 
+-- | Helpers for debug tracing
+stripPositionsDecl :: P.Declaration -> P.Declaration
+stripPositionsBinder :: P.Binder -> P.Binder
+stripPositionsExpr :: P.Expr -> P.Expr
+(stripPositionsDecl, stripPositionsExpr, stripPositionsBinder) = P.everywhereOnValues
+      (\case (P.PositionedDeclaration _ _ d) -> d
+             d -> d)
+      (\case e@(P.PositionedValue _ _ (P.Let{})) -> e
+             (P.PositionedValue _ _ e) -> e
+             e -> e)
+      (\case (P.PositionedBinder _ _ b) -> b
+             b -> b)
+
+showWithoutSpans :: Match -> Text
+showWithoutSpans m = case m of
+  DeclarationMatch _ d -> show (stripPositionsDecl d)
+  ExprMatch _ e -> show (stripPositionsExpr e)
+  BinderMatch _ b -> show (stripPositionsBinder b)
+  DoNotationMatch _ d -> show d
+
 type File = Text
 
 data SSpan = SSpan
@@ -196,7 +216,6 @@ commandProcessor command respond = case command of
         put (SelectingState (Selecting file' modul z))
         respond =<< respondSpan
   Narrow -> do
-    -- [match] <- uses (selectingMatches . focus . matchSpan . Control.Lens.to pure) traceShowId
     _SelectingState.selectingMatches %= tug rightward
     respond =<< respondSpan
   Widen -> do
@@ -210,7 +229,11 @@ commandProcessor command respond = case command of
         put Waiting
         respond (Message "Didn't match")
       Just z -> do
-        let occurrences = selectingFindOccurrences (Selecting file modul z)
+        -- let occurrences = selectingFindOccurrences (Selecting file modul z)
+        let occurrences = case getIdentAtPoint (Selecting file modul z) of
+              Nothing -> []
+              Just i' ->
+                maybeToList $ asum $ (map (isBoundInMatch i') (upward z ^. focus & reverse) )
         respond (Spans occurrences)
   Rename fp l c newName -> do
     file <- liftIO (T.readFile (toS fp))
@@ -222,6 +245,14 @@ commandProcessor command respond = case command of
       Just z -> do
         let occurrences = selectingFindOccurrences (Selecting file modul z)
         respond (Edits (computeChangeset newName occurrences))
+
+getIdentAtPoint :: Selecting -> Maybe Text
+getIdentAtPoint selecting = flip evalState selecting $ do
+  selectionMaybe <- use (selectingMatches . focus)
+  pure $ case selectionMaybe of
+    BinderMatch _ (P.VarBinder (P.Ident ident)) -> Just ident
+    ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> Just ident
+    _ -> Nothing
 
 selectingFindOccurrences :: Selecting -> [SSpan]
 selectingFindOccurrences selecting = flip evalState selecting $ do
@@ -278,23 +309,32 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
              b -> pure b)
 
 isBoundInMatch :: Text -> Match -> Maybe SSpan
-isBoundInMatch i m = case m of
+isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   DeclarationMatch s decl -> case decl of
-    P.ValueDeclaration (P.Ident ident ) _ _ _
+    P.ValueDeclaration (P.Ident ident ) _ binders _
       | ident == i -> Just (s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i))
+      | otherwise -> listToMaybe (concatMap (findBindersForInBinder i) binders)
     P.BoundValueDeclaration binder _ ->
       listToMaybe (findBindersForInBinder i binder)
     P.PositionedDeclaration sspan _ d ->
       isBoundInMatch i (DeclarationMatch (sspan^.convertSpan) d)
     _ -> Nothing
-  ExprMatch s expr -> case expr of
+  ExprMatch _ expr -> case expr of
     P.Abs binder _ ->
       listToMaybe (findBindersForInBinder i binder)
     P.Let decls _ ->
       listToMaybe (mapMaybe (isValueDecl i) decls)
+    P.PositionedValue sspan _ expr' ->
+      isBoundInMatch i (ExprMatch (sspan^.convertSpan) expr')
+    _ ->
+      Nothing
+  _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
-isValueDecl ident (P.PositionedDeclaration ss (P.ValueDeclaration i _)) | i == ident = Just (ss^.convertSpan)
+isValueDecl ident (P.PositionedDeclaration ss _ (P.ValueDeclaration (P.Ident i) _ _ _))
+  | i == ident = Just (ss^.convertSpan)
+isValueDecl ident (P.PositionedDeclaration _ _ (P.BoundValueDeclaration binder _)) =
+  listToMaybe $ findBindersForInBinder ident binder
 isValueDecl _ _ = Nothing
 
 isBoundIn :: Text -> P.Declaration -> Bool

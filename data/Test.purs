@@ -3,7 +3,7 @@ module MorganaTest where
 hello = 1 + 2
 
 whatever :: Int
-whatever (Just {hello, whatever: x}) =
+whatever (Just {hello, whatever: x}) hello =
    do hello x x + show x
       hello x x
 
@@ -14,14 +14,16 @@ whatever (Just {hello, whatever: x}) =
       lol
 
       pure {x: x}
-      where
-        X q = let a = b in b rofl
-        lol = x
+   where
+     X q = let a = b in q rofl
+     lol = x
 
 double :: Int -> Int -> Int
 double x = x + x
 
 declarationLevelBinder x = x
+
+declarationLevelBinder x = do x
 
 declarationLevelPattern (X x) = x
 
@@ -53,7 +55,7 @@ doPattern = do
   X x <- y
   x
 
-lambdaBinder = \x -> \x -> x
+lambdaBinder = \x -> x \x -> x
 
 lambdaPattern = \(X x) -> x
 
