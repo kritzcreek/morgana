@@ -230,10 +230,8 @@ commandProcessor command respond = case command of
         respond (Message "Didn't match")
       Just z -> do
         -- let occurrences = selectingFindOccurrences (Selecting file modul z)
-        let occurrences = case getIdentAtPoint (Selecting file modul z) of
-              Nothing -> []
-              Just i' ->
-                maybeToList $ asum $ (map (isBoundInMatch i') (upward z ^. focus & reverse) )
+        let occurrences =
+              maybeToList (evalState findBinderForSelection (Selecting file modul z))
         respond (Spans occurrences)
   Rename fp l c newName -> do
     file <- liftIO (T.readFile (toS fp))
@@ -242,9 +240,33 @@ commandProcessor command respond = case command of
       Nothing -> do
         put Waiting
         respond (Message "Didn't match")
-      Just z -> do
-        let occurrences = selectingFindOccurrences (Selecting file modul z)
-        respond (Edits (computeChangeset newName occurrences))
+      Just z ->
+        let
+          result = flip evalState (Selecting file modul z) $ do
+            occurrences <- selectingFindOccurrences
+            binder' <- findBinderForSelection
+            -- traceM ("Occurrences: " <> show occurrences)
+            -- traceM ("Binder': " <> show binder')
+            case binder' of
+              Nothing -> pure []
+              Just binder1 -> do
+                -- traceShowM binder1
+                flip filterM occurrences $ \sspan -> do
+                  setSuccess <- setCursor (sspan^.ssStart)
+                  if setSuccess
+                    then
+                      findBinderForSelection <&> (Just binder1 ==)
+                    else
+                      do traceM "Something went wrong here" $> False
+        in
+          respond (Edits (computeChangeset newName result))
+
+setCursor :: SPos -> State Selecting Bool
+setCursor (SPos l c)= do
+  modul <- use selectingModule
+  case (zipper (allMatches modul l c) & within traverse <&> rightmost) of
+    Nothing -> pure False
+    Just z -> (selectingMatches .= z) $> True
 
 getIdentAtPoint :: Selecting -> Maybe Text
 getIdentAtPoint selecting = flip evalState selecting $ do
@@ -254,17 +276,15 @@ getIdentAtPoint selecting = flip evalState selecting $ do
     ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> Just ident
     _ -> Nothing
 
-selectingFindOccurrences :: Selecting -> [SSpan]
-selectingFindOccurrences selecting = flip evalState selecting $ do
+selectingFindOccurrences :: State Selecting [SSpan]
+selectingFindOccurrences = do
   selectionMaybe <- use (selectingMatches . focus)
   let i = case selectionMaybe of
             BinderMatch _ (P.VarBinder (P.Ident ident)) -> ident
             ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> ident
             _ -> "NotFound"
-  traceM ("ident: " <> i)
   selectingMatches %= leftmost
   current <- use (selectingMatches . focus)
-  traceShowM current
   case current of
     DeclarationMatch _ d ->
       let x = if isBoundIn i d
@@ -308,6 +328,16 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
 
+findBinderForSelection :: State Selecting (Maybe SSpan)
+findBinderForSelection = do
+  selectingMatches %= rightmost
+  i <- gets getIdentAtPoint
+  z <- use selectingMatches
+  case i of
+    Just i' ->
+      pure (asum $ (map (isBoundInMatch i') (upward z ^. focus & reverse)))
+    Nothing -> traceM "Failed findBinderSelection" *> pure Nothing
+
 isBoundInMatch :: Text -> Match -> Maybe SSpan
 isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   DeclarationMatch s decl -> case decl of
@@ -324,6 +354,17 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
       listToMaybe (findBindersForInBinder i binder)
     P.Let decls _ ->
       listToMaybe (mapMaybe (isValueDecl i) decls)
+    P.Do els ->
+      els
+       & concatMap (\case
+                       (P.PositionedDoNotationElement _ _ (P.DoNotationBind binder _)) -> findBindersForInBinder i binder
+                       _ -> mempty)
+       & listToMaybe
+    P.Case _ alternatives ->
+      alternatives
+       & concatMap P.caseAlternativeBinders
+       & concatMap (findBindersForInBinder i)
+       & listToMaybe
     P.PositionedValue sspan _ expr' ->
       isBoundInMatch i (ExprMatch (sspan^.convertSpan) expr')
     _ ->

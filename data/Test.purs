@@ -8,15 +8,16 @@ whatever (Just {hello, whatever: x}) hello =
       hello x x
 
       rofl <- x test
-
       -- x
       x {hello}
       lol
+      rofl
+      q
 
       pure {x: x}
    where
      X q = let a = b in q rofl
-     lol = x
+     X lol = x
 
 double :: Int -> Int -> Int
 double x = x + x
@@ -39,13 +40,15 @@ whereBinder y = x
 
 wherePattern y = x
   where
-    (X x) = y
+    (X x) = x
+    (Y k) = x
 
 caseBinder = case _ of
   x -> x
 
 casePattern = case _ of
   X x -> x
+  Y x -> x
 
 doBinder = do
   x <- y
