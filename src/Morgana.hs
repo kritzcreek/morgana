@@ -310,7 +310,9 @@ findBindersFor ident decl = execState (matcherDecl decl) []
   where
     (matcherDecl, _, _) = P.everywhereOnValuesTopDownM
       (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
-               | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> d
+               | ident == ident'-> modify (cons (valueDeclarationToBinderSpan
+                                                 (sourceSpan'^.convertSpan)
+                                                 ident)) $> d
              d -> pure d)
       pure
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
@@ -322,12 +324,19 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
   where
     (_, _, matcherBinder) = P.everywhereOnValuesTopDownM
       (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
-               | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> d
+               | ident == ident'-> modify (cons
+                                           (valueDeclarationToBinderSpan
+                                            (sourceSpan'^.convertSpan)
+                                            ident)) $> d
              d -> pure d)
       pure
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
+
+valueDeclarationToBinderSpan :: SSpan -> Text -> SSpan
+valueDeclarationToBinderSpan s i =
+  s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i)
 
 findBinderForSelection :: State Selecting (Maybe SSpan)
 findBinderForSelection = do
@@ -343,7 +352,7 @@ isBoundInMatch :: Text -> Match -> Maybe SSpan
 isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   DeclarationMatch s decl -> case decl of
     P.ValueDeclaration (P.Ident ident ) _ binders _
-      | ident == i -> Just (s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i))
+      | ident == i -> Just (valueDeclarationToBinderSpan s ident)
       | otherwise -> listToMaybe (concatMap (findBindersForInBinder i) binders)
     P.BoundValueDeclaration binder _ ->
       listToMaybe (findBindersForInBinder i binder)
@@ -373,10 +382,10 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
-isValueDecl ident (P.PositionedDeclaration (view convertSpan -> s) _ (P.ValueDeclaration (P.Ident i) _ _ _))
-  | i == ident = Just (s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i))
+isValueDecl ident (P.PositionedDeclaration sourceSpan _ (P.ValueDeclaration (P.Ident i) _ _ _))
+  | i == ident = Just (valueDeclarationToBinderSpan (sourceSpan^.convertSpan) i)
 isValueDecl ident (P.PositionedDeclaration _ _ (P.BoundValueDeclaration binder _)) =
-  listToMaybe $ findBindersForInBinder ident binder
+  listToMaybe (findBindersForInBinder ident binder)
 isValueDecl _ _ = Nothing
 
 isBoundIn :: Text -> P.Declaration -> Bool
@@ -389,7 +398,7 @@ findOccurrences ident = matcher
       P.everythingOnValues
       (<>)
       (\case (P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _)) ->
-               [let s = sourceSpan'^.convertSpan in s & endColumn .~ (s^.startColumn + T.length ident') | ident == ident']
+               [valueDeclarationToBinderSpan (sourceSpan'^.convertSpan) ident | ident == ident']
              _ -> [])
       (\case (P.PositionedValue sourceSpan' _ (P.Var (P.Qualified Nothing (P.Ident ident')))) ->
                [sourceSpan'^.convertSpan | ident == ident']
