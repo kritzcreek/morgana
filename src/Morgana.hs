@@ -1,6 +1,7 @@
 {-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE NoImplicitPrelude          #-}
 {-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE ViewPatterns               #-}
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE FlexibleContexts           #-}
@@ -372,8 +373,8 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
-isValueDecl ident (P.PositionedDeclaration ss _ (P.ValueDeclaration (P.Ident i) _ _ _))
-  | i == ident = Just (ss^.convertSpan)
+isValueDecl ident (P.PositionedDeclaration (view convertSpan -> s) _ (P.ValueDeclaration (P.Ident i) _ _ _))
+  | i == ident = Just (s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i))
 isValueDecl ident (P.PositionedDeclaration _ _ (P.BoundValueDeclaration binder _)) =
   listToMaybe $ findBindersForInBinder ident binder
 isValueDecl _ _ = Nothing
