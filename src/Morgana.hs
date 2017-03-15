@@ -275,6 +275,7 @@ getIdentAtPoint selecting = flip evalState selecting $ do
   pure $ case selectionMaybe of
     BinderMatch _ (P.VarBinder (P.Ident ident)) -> Just ident
     ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> Just ident
+    DeclarationMatch _ (P.ValueDeclaration (P.Ident ident) _ _ _) -> Just ident
     _ -> Nothing
 
 selectingFindOccurrences :: State Selecting [SSpan]
@@ -328,6 +329,8 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
                                            (valueDeclarationToBinderSpan
                                             (sourceSpan'^.convertSpan)
                                             ident)) $> d
+             d@(P.ValueDeclaration _ _ binders _) -> do
+               modify ((++) (foldMap (findBindersForInBinder ident) binders)) $> d
              d -> pure d)
       pure
       (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
