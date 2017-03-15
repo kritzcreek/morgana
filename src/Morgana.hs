@@ -22,43 +22,12 @@ import qualified Data.Text           as T
 import qualified Data.Text.IO        as T
 import qualified Language.PureScript as P
 
-data Match where
-  DeclarationMatch :: SSpan -> P.Declaration       -> Match
-  ExprMatch        :: SSpan -> P.Expr              -> Match
-  BinderMatch      :: SSpan -> P.Binder            -> Match
-  DoNotationMatch  :: SSpan -> P.DoNotationElement -> Match
-  CaseMatch        :: SSpan -> P.CaseAlternative   -> Match
-  deriving (Show)
-
--- | Helpers for debug tracing
-stripPositionsDecl :: P.Declaration -> P.Declaration
-stripPositionsBinder :: P.Binder -> P.Binder
-stripPositionsExpr :: P.Expr -> P.Expr
-(stripPositionsDecl, stripPositionsExpr, stripPositionsBinder) = P.everywhereOnValues
-      (\case (P.PositionedDeclaration _ _ d) -> d
-             d -> d)
-      (\case e@(P.PositionedValue _ _ (P.Let{})) -> e
-             (P.PositionedValue _ _ e) -> e
-             e -> e)
-      (\case (P.PositionedBinder _ _ b) -> b
-             b -> b)
-
-showWithoutSpans :: Match -> Text
-showWithoutSpans m = case m of
-  DeclarationMatch _ d -> show (stripPositionsDecl d)
-  ExprMatch _ e -> show (stripPositionsExpr e)
-  BinderMatch _ b -> show (stripPositionsBinder b)
-  DoNotationMatch _ d -> show d
-  CaseMatch _ c -> show c
-
 getSpanFromBinder :: P.Binder -> Maybe P.SourceSpan
 getSpanFromBinder (P.PositionedBinder ss _ _) = Just ss
 getSpanFromBinder _ = Nothing
 getSpanFromGuardedExpr :: P.GuardedExpr -> Maybe P.SourceSpan
 getSpanFromGuardedExpr (P.GuardedExpr _ (P.PositionedValue ss _ _)) = Just ss
 getSpanFromGuardedExpr _ = Nothing
-
-type File = Text
 
 data SSpan = SSpan
   { _ssFile :: !Text
@@ -110,6 +79,41 @@ convertSpan =
   (\(P.SourceSpan fn start end) -> (SSpan (T.pack fn) (start^.convertPos) (end^.convertPos)))
   (\(SSpan fn start end) -> P.SourceSpan (toS fn) (start^. from convertPos) (end^. from convertPos))
 
+data Match where
+  DeclarationMatch :: SSpan -> P.Declaration       -> Match
+  ExprMatch        :: SSpan -> P.Expr              -> Match
+  BinderMatch      :: SSpan -> P.Binder            -> Match
+  DoNotationMatch  :: SSpan -> P.DoNotationElement -> Match
+  CaseMatch        :: SSpan -> P.CaseAlternative   -> Match
+  deriving (Show)
+
+-- | Helpers for debug tracing
+stripPositionsDecl :: P.Declaration -> P.Declaration
+stripPositionsBinder :: P.Binder -> P.Binder
+stripPositionsExpr :: P.Expr -> P.Expr
+(stripPositionsDecl, stripPositionsExpr, stripPositionsBinder) = P.everywhereOnValues
+      (\case (P.PositionedDeclaration _ _ d) -> d
+             d -> d)
+      (\case e@(P.PositionedValue _ _ (P.Let{})) -> e
+             (P.PositionedValue _ _ e) -> e
+             e -> e)
+      (\case (P.PositionedBinder _ _ b) -> b
+             b -> b)
+
+instance Eq Match where
+  (==) = (==) `on` view matchSpan
+
+instance Ord Match where
+  compare = compare `on` view matchSpan
+
+showWithoutSpans :: Match -> Text
+showWithoutSpans m = case m of
+  DeclarationMatch _ d -> show (stripPositionsDecl d)
+  ExprMatch _ e -> show (stripPositionsExpr e)
+  BinderMatch _ b -> show (stripPositionsBinder b)
+  DoNotationMatch _ d -> show d
+  CaseMatch _ c -> show c
+
 matchSpan :: Lens' Match SSpan
 matchSpan = lens getSP setSP
   where
@@ -126,12 +130,6 @@ matchSpan = lens getSP setSP
     setSP (BinderMatch _ d) sp = BinderMatch sp d
     setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
     setSP (CaseMatch _ d) sp = CaseMatch sp d
-
-instance Eq Match where
-  (==) = (==) `on` view matchSpan
-
-instance Ord Match where
-  compare = compare `on` view matchSpan
 
 extractor :: SPos -> P.Declaration -> [Match]
 extractor sp = matcher
