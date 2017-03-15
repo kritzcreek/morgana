@@ -1,14 +1,4 @@
-{-# LANGUAGE TupleSections              #-}
-{-# LANGUAGE NoImplicitPrelude          #-}
-{-# LANGUAGE GADTs                      #-}
-{-# LANGUAGE ViewPatterns               #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE FlexibleContexts           #-}
-{-# LANGUAGE TypeOperators              #-}
-{-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module Morgana where
 
 import           Control.Lens
@@ -16,212 +6,58 @@ import           Control.Zipper
 import           Network (listenOn, withSocketsDo, accept, PortID(..), Socket)
 import           Protolude hiding (from, (&), to)
 import           System.IO (hSetBuffering, hFlush, BufferMode(..))
+import           Morgana.Types
 import           Unsafe
 import qualified Data.List as List
 import qualified Data.Text           as T
 import qualified Data.Text.IO        as T
 import qualified Language.PureScript as P
 
-getSpanFromBinder :: P.Binder -> Maybe P.SourceSpan
-getSpanFromBinder (P.PositionedBinder ss _ _) = Just ss
-getSpanFromBinder _ = Nothing
-getSpanFromGuardedExpr :: P.GuardedExpr -> Maybe P.SourceSpan
-getSpanFromGuardedExpr (P.GuardedExpr _ (P.PositionedValue ss _ _)) = Just ss
-getSpanFromGuardedExpr _ = Nothing
 
-data SSpan = SSpan
-  { _ssFile :: !Text
-  , _ssStart :: !SPos
-  , _ssEnd :: !SPos
-  } deriving (Show, Eq)
-
-data SPos = SPos
-  { _spLine :: !Int
-  , _spColumn :: !Int
-  } deriving (Show, Eq)
-
-makeLenses ''SPos
-makeLenses ''SSpan
-
-startLine, startColumn, endLine, endColumn :: Lens' SSpan Int
-startLine = ssStart.spLine
-startColumn = ssStart.spColumn
-endLine = ssEnd.spLine
-endColumn = ssEnd.spColumn
-
-fields2 :: Lens' s a -> Lens' s a -> Traversal' s a
-fields2 f1 f2 f s = (\v1 v2 -> s & f1 .~ v1 & f2 .~ v2) <$> f (s ^. f1) <*> f (s ^. f2)
-
-columns :: Traversal' SSpan Int
-columns = fields2 startColumn endColumn
-
-lines :: Traversal' SSpan Int
-lines = fields2 startLine endLine
-
-instance Ord SSpan where
-  compare s1 s2
-    | s1^.ssFile == s2^.ssFile = (compare `on` view ssStart) s1 s2
-    | otherwise = (compare `on` view ssFile) s1 s2
-
-instance Ord SPos where
-  compare (SPos x1 y1) (SPos x2 y2)
-    | x1 < x2 = LT
-    | x1 == x2 && y1 < y2 = LT
-    | x1 == x2 && y1 == y2 = EQ
-    | otherwise = GT
-
-convertPos :: Iso' P.SourcePos SPos
-convertPos = iso (\(P.SourcePos l c) -> SPos l c) (\(SPos l c) -> P.SourcePos l c)
-
-convertSpan :: Iso' P.SourceSpan SSpan
-convertSpan =
-  iso
-  (\(P.SourceSpan fn start end) -> (SSpan (T.pack fn) (start^.convertPos) (end^.convertPos)))
-  (\(SSpan fn start end) -> P.SourceSpan (toS fn) (start^. from convertPos) (end^. from convertPos))
-
-data Match where
-  DeclarationMatch     :: SSpan -> P.Declaration       -> Match
-  ExprMatch            :: SSpan -> P.Expr              -> Match
-  BinderMatch          :: SSpan -> P.Binder            -> Match
-  DoNotationMatch      :: SSpan -> P.DoNotationElement -> Match
-  CaseAlternativeMatch :: SSpan -> P.CaseAlternative   -> Match
-  deriving (Show)
-
--- | Helpers for debug tracing
-stripPositionsDecl :: P.Declaration -> P.Declaration
-stripPositionsBinder :: P.Binder -> P.Binder
-stripPositionsExpr :: P.Expr -> P.Expr
-(stripPositionsDecl, stripPositionsExpr, stripPositionsBinder) = P.everywhereOnValues
-      (\case (P.PositionedDeclaration _ _ d) -> d
-             d -> d)
-      (\case e@(P.PositionedValue _ _ (P.Let{})) -> e
-             (P.PositionedValue _ _ e) -> e
-             e -> e)
-      (\case (P.PositionedBinder _ _ b) -> b
-             b -> b)
-
-instance Eq Match where
-  (==) = (==) `on` view matchSpan
-
-instance Ord Match where
-  compare = compare `on` view matchSpan
-
-showWithoutSpans :: Match -> Text
-showWithoutSpans m = case m of
-  DeclarationMatch _ d -> show (stripPositionsDecl d)
-  ExprMatch _ e -> show (stripPositionsExpr e)
-  BinderMatch _ b -> show (stripPositionsBinder b)
-  DoNotationMatch _ d -> show d
-  CaseAlternativeMatch _ c -> show c
-
-matchSpan :: Lens' Match SSpan
-matchSpan = lens getSP setSP
+allMatchesInModule :: P.Module -> Int -> Int -> [Match]
+allMatchesInModule (P.Module _ _ _ declarations _) l c = foldMap (extractor (SPos l c)) declarations
   where
-    getSP :: Match -> SSpan
-    getSP (DeclarationMatch sp _) = sp
-    getSP (ExprMatch sp _) = sp
-    getSP (BinderMatch sp _) = sp
-    getSP (DoNotationMatch sp _) = sp
-    getSP (CaseAlternativeMatch sp _) = sp
-
-    setSP :: Match -> SSpan -> Match
-    setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
-    setSP (ExprMatch _ d) sp = ExprMatch sp d
-    setSP (BinderMatch _ d) sp = BinderMatch sp d
-    setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
-    setSP (CaseAlternativeMatch _ d) sp = CaseAlternativeMatch sp d
-
-extractor :: SPos -> P.Declaration -> [Match]
-extractor sp = matcher
-  where
-    (matcher, _, _, _, _) =
-      P.everythingOnValues
-      (<>)
-      (\case (P.PositionedDeclaration (view convertSpan -> sourceSpan') _ d) ->
-               [DeclarationMatch sourceSpan' d | matches sp sourceSpan']
-             _ -> [])
-      (\case (P.PositionedValue (view convertSpan -> sourceSpan') _ e) ->
-               [ExprMatch sourceSpan' e | matches sp sourceSpan']
-             _ -> [])
-      (\case (P.PositionedBinder (view convertSpan -> sourceSpan') _ b) ->
-               [BinderMatch sourceSpan' b | matches sp sourceSpan']
-             _ -> [])
-      (\case ca@(P.CaseAlternative binders body)
-               | Just start <- view convertSpan <$> (getSpanFromBinder =<< head binders)
-               , Just end <- view (convertSpan.ssEnd) <$> (getSpanFromGuardedExpr =<< lastMay body)
-               -> let sourceSpan' = SSpan (start^.ssFile) (start^.ssStart) end
-                  in [CaseAlternativeMatch sourceSpan' ca | matches sp sourceSpan']
-             _ -> [])
-      (\case (P.PositionedDoNotationElement (view convertSpan -> sourceSpan') _ dne) ->
-               [DoNotationMatch sourceSpan' dne | matches sp sourceSpan']
-             _ -> [])
-
-allMatches :: P.Module -> Int -> Int -> [Match]
-allMatches (P.Module _ _ _ d _) l c = foldMap (extractor (SPos l c)) d
-
-fromRight :: Either a b -> b
-fromRight = unsafeFromJust . rightToMaybe
+    extractor :: SPos -> P.Declaration -> [Match]
+    extractor sp = matcher
+      where
+        (matcher, _, _, _, _) =
+          P.everythingOnValues
+          (<>)
+          (\case (P.PositionedDeclaration (view convertSpan -> sourceSpan') _ d) ->
+                  [DeclarationMatch sourceSpan' d | isWithin sp sourceSpan']
+                 _ -> [])
+          (\case (P.PositionedValue (view convertSpan -> sourceSpan') _ e) ->
+                  [ExprMatch sourceSpan' e | isWithin sp sourceSpan']
+                 _ -> [])
+          (\case (P.PositionedBinder (view convertSpan -> sourceSpan') _ b) ->
+                  [BinderMatch sourceSpan' b | isWithin sp sourceSpan']
+                 _ -> [])
+          (\case ca@(P.CaseAlternative binders body)
+                  | Just start <- view convertSpan <$> (getSpanFromBinder =<< head binders)
+                  , Just end <- view (convertSpan.ssEnd) <$> (getSpanFromGuardedExpr =<< lastMay body)
+                  -> let sourceSpan' = SSpan (start^.ssFile) (start^.ssStart) end
+                      in [CaseAlternativeMatch sourceSpan' ca | isWithin sp sourceSpan']
+                 _ -> [])
+          (\case (P.PositionedDoNotationElement (view convertSpan -> sourceSpan') _ dne) ->
+                  [DoNotationMatch sourceSpan' dne | isWithin sp sourceSpan']
+                 _ -> [])
 
 unsafeParseModule :: Text -> P.Module
 unsafeParseModule t = snd . fromRight $ P.parseModuleFromFile identity ("hi", toS t)
-
-matches :: SPos -> SSpan -> Bool
-matches pos span =
-    span^.ssStart <= pos && pos <= span^.ssEnd
-
-data Selecting =
-  Selecting
-    { _selectingFile    :: Text
-    , _selectingModule  :: P.Module
-    , _selectingMatches :: Top :>> [Match] :>> Match
-    , _selectingCursor  :: SPos
-    }
-
-makeLenses ''Selecting
-
-data SState
-  = Waiting
-  | SelectingState Selecting
-
-makePrisms ''SState
-
-newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
-
-respond' :: (MonadIO m) => Handle -> Response -> m ()
-respond' h r = case r of
-  Message t ->
-    liftIO (T.hPutStrLn h ("m: " <> t))
-  Span _ ss ->
-    liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
-  Spans sourceSpans ->
-    liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
-  Edits edits ->
-    liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
   where
-    answerSS (SSpan _ (SPos x1 y1) (SPos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
-    answerEdit (ss, text) = answerSS ss <> " " <> text
+    fromRight :: Either a b -> b
+    fromRight = unsafeFromJust . rightToMaybe
 
-data Response
-  = Message Text
-  | Span Text SSpan
-  | Spans [SSpan]
-  | Edits [(SSpan, Text)]
-
-
-data Command
-  = Pos Text Int Int
-  | Widen
-  | Narrow
-  | FindOccurrences Text Int Int
-  | Rename Text Int Int Text
+isWithin :: SPos -> SSpan -> Bool
+isWithin pos span =
+    span^.ssStart <= pos && pos <= span^.ssEnd
 
 commandProcessor :: (MonadState SState m, MonadIO m) => Command -> (Response -> m ()) -> m ()
 commandProcessor command respond = case command of
   Pos fp l c -> do
     file' <- liftIO (T.readFile (toS fp))
     let modul = unsafeParseModule file'
-    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+    case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
         respond (Message "Didn't match")
@@ -237,7 +73,7 @@ commandProcessor command respond = case command of
   FindOccurrences fp l c -> do
     file <- liftIO (T.readFile (toS fp))
     let modul = unsafeParseModule file
-    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+    case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
         respond (Message "Didn't match")
@@ -249,7 +85,7 @@ commandProcessor command respond = case command of
   Rename fp l c newName -> do
     file <- liftIO (T.readFile (toS fp))
     let modul = unsafeParseModule file
-    case zipper (allMatches modul l c) & within traverse <&> rightmost of
+    case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
         respond (Message "Didn't match")
@@ -277,7 +113,7 @@ commandProcessor command respond = case command of
 setCursor :: SPos -> State Selecting Bool
 setCursor (SPos l c)= do
   modul <- use selectingModule
-  case zipper (allMatches modul l c) & within traverse <&> rightmost of
+  case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
     Nothing -> pure False
     Just z -> do
       selectingMatches .= z
@@ -439,6 +275,8 @@ findOccurrences ident = matcher
       (const [])
       (const [])
 
+-- Accepting and responding to commands
+
 respondSpan :: (MonadState SState m, MonadIO m) => m Response
 respondSpan = do
   s <- get
@@ -482,13 +320,29 @@ simpleParse t =
   case T.words t of
     ["w"] -> Just Widen
     ["n"] -> Just Narrow
-    ["o", fp, x, y] -> FindOccurrences fp <$> readMaybe (toS x) <*> readMaybe (toS y) 
+    ["o", fp, x, y] -> FindOccurrences fp <$> readMaybe (toS x) <*> readMaybe (toS y)
     ["r", fp, x, y, newName] -> Rename fp <$> readMaybe (toS x) <*> readMaybe (toS y) <*> pure newName
     ["s", fp, x, y] -> Pos fp <$> readMaybe (toS x) <*> readMaybe (toS y)
     _ -> Nothing
 
--- MAIN --
+newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
+  deriving (Functor, Applicative, Monad, MonadIO, MonadState SState)
 
+respond' :: (MonadIO m) => Handle -> Response -> m ()
+respond' h r = case r of
+  Message t ->
+    liftIO (T.hPutStrLn h ("m: " <> t))
+  Span _ ss ->
+    liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
+  Spans sourceSpans ->
+    liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
+  Edits edits ->
+    liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
+  where
+    answerSS (SSpan _ (SPos x1 y1) (SPos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
+    answerEdit (ss, text) = answerSS ss <> " " <> text
+
+-- MAIN --
 main :: IO ()
 main = withSocketsDo $ do
     args <- getArgs
