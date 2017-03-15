@@ -34,11 +34,15 @@ letBinder y =
   in
     x
 
-whereBinder y = x
+whereBinder y = hello
   where
-    x = y
+    x = k a
 
-wherePattern y = x
+whereBinderFn y = f
+  where
+    f x = x
+
+wherePattern x = x
   where
     (X x) = x
     (Y k) = x

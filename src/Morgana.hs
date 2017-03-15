@@ -14,7 +14,7 @@ module Morgana where
 import           Control.Lens
 import           Control.Zipper
 import           Network (listenOn, withSocketsDo, accept, PortID(..), Socket)
-import           Protolude hiding (from, (&))
+import           Protolude hiding (from, (&), to)
 import           System.IO (hSetBuffering, hFlush, BufferMode(..))
 import           Unsafe
 import qualified Data.List as List
@@ -27,6 +27,7 @@ data Match where
   ExprMatch        :: SSpan -> P.Expr              -> Match
   BinderMatch      :: SSpan -> P.Binder            -> Match
   DoNotationMatch  :: SSpan -> P.DoNotationElement -> Match
+  CaseMatch        :: SSpan -> P.CaseAlternative   -> Match
   deriving (Show)
 
 -- | Helpers for debug tracing
@@ -48,6 +49,14 @@ showWithoutSpans m = case m of
   ExprMatch _ e -> show (stripPositionsExpr e)
   BinderMatch _ b -> show (stripPositionsBinder b)
   DoNotationMatch _ d -> show d
+  CaseMatch _ c -> show c
+
+getSpanFromBinder :: P.Binder -> Maybe P.SourceSpan
+getSpanFromBinder (P.PositionedBinder ss _ _) = Just ss
+getSpanFromBinder _ = Nothing
+getSpanFromGuardedExpr :: P.GuardedExpr -> Maybe P.SourceSpan
+getSpanFromGuardedExpr (P.GuardedExpr _ (P.PositionedValue ss _ _)) = Just ss
+getSpanFromGuardedExpr _ = Nothing
 
 type File = Text
 
@@ -109,12 +118,14 @@ matchSpan = lens getSP setSP
     getSP (ExprMatch sp _) = sp
     getSP (BinderMatch sp _) = sp
     getSP (DoNotationMatch sp _) = sp
+    getSP (CaseMatch sp _) = sp
 
     setSP :: Match -> SSpan -> Match
     setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
     setSP (ExprMatch _ d) sp = ExprMatch sp d
     setSP (BinderMatch _ d) sp = BinderMatch sp d
     setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
+    setSP (CaseMatch _ d) sp = CaseMatch sp d
 
 instance Eq Match where
   (==) = (==) `on` view matchSpan
@@ -122,28 +133,33 @@ instance Eq Match where
 instance Ord Match where
   compare = compare `on` view matchSpan
 
-extractor :: P.SourcePos -> P.Declaration -> [Match]
+extractor :: SPos -> P.Declaration -> [Match]
 extractor sp = matcher
   where
     (matcher, _, _, _, _) =
       P.everythingOnValues
       (<>)
-      (\case (P.PositionedDeclaration sourceSpan' _ d) ->
-               [DeclarationMatch (sourceSpan' ^. convertSpan) d | matches sp sourceSpan']
+      (\case (P.PositionedDeclaration (view convertSpan -> sourceSpan') _ d) ->
+               [DeclarationMatch sourceSpan' d | matches sp sourceSpan']
              _ -> [])
-      (\case (P.PositionedValue sourceSpan' _ e) ->
-               [ExprMatch (sourceSpan' ^. convertSpan) e | matches sp sourceSpan']
+      (\case (P.PositionedValue (view convertSpan -> sourceSpan') _ e) ->
+               [ExprMatch sourceSpan' e | matches sp sourceSpan']
              _ -> [])
-      (\case (P.PositionedBinder sourceSpan' _ b) ->
-               [BinderMatch (sourceSpan' ^. convertSpan) b | matches sp sourceSpan']
+      (\case (P.PositionedBinder (view convertSpan -> sourceSpan') _ b) ->
+               [BinderMatch sourceSpan' b | matches sp sourceSpan']
              _ -> [])
-      (const [])
-      (\case (P.PositionedDoNotationElement sourceSpan' _ dne) ->
-               [DoNotationMatch (sourceSpan' ^. convertSpan) dne | matches sp sourceSpan']
+      (\case ca@(P.CaseAlternative binders body)
+               | Just start <- view convertSpan <$> (getSpanFromBinder =<< head binders)
+               , Just end <- view (convertSpan.ssEnd) <$> (getSpanFromGuardedExpr =<< lastMay body)
+               -> let sourceSpan' = SSpan (start^.ssFile) (start^.ssStart) end
+                  in [CaseMatch sourceSpan' ca | matches sp sourceSpan']
+             _ -> [])
+      (\case (P.PositionedDoNotationElement (view convertSpan -> sourceSpan') _ dne) ->
+               [DoNotationMatch sourceSpan' dne | matches sp sourceSpan']
              _ -> [])
 
 allMatches :: P.Module -> Int -> Int -> [Match]
-allMatches (P.Module _ _ _ d _) l c = concatMap (extractor (P.SourcePos l c)) d
+allMatches (P.Module _ _ _ d _) l c = concatMap (extractor (SPos l c)) d
 
 fromRight :: Either a b -> b
 fromRight = unsafeFromJust . rightToMaybe
@@ -151,19 +167,16 @@ fromRight = unsafeFromJust . rightToMaybe
 unsafeParseModule :: Text -> P.Module
 unsafeParseModule t = snd . fromRight $ P.parseModuleFromFile identity ("hi", toS t)
 
-matches :: P.SourcePos -> P.SourceSpan -> Bool
+matches :: SPos -> SSpan -> Bool
 matches pos span =
-  let
-    pos' = pos^.convertPos
-    span' = span^.convertSpan
-  in
-    span'^.ssStart <= pos' && pos' <= span'^.ssEnd
+    span^.ssStart <= pos && pos <= span^.ssEnd
 
 data Selecting =
   Selecting
     { _selectingFile    :: Text
     , _selectingModule  :: P.Module
     , _selectingMatches :: Top :>> [Match] :>> Match
+    , _selectingCursor  :: SPos
     }
 
 makeLenses ''Selecting
@@ -197,6 +210,7 @@ data Response
   | Spans [SSpan]
   | Edits [(SSpan, Text)]
 
+
 data Command
   = Pos Text Int Int
   | Widen
@@ -214,7 +228,7 @@ commandProcessor command respond = case command of
         put Waiting
         respond (Message "Didn't match")
       Just z -> do
-        put (SelectingState (Selecting file' modul z))
+        put (SelectingState (Selecting file' modul z (SPos l c)))
         respond =<< respondSpan
   Narrow -> do
     _SelectingState.selectingMatches %= tug rightward
@@ -232,7 +246,7 @@ commandProcessor command respond = case command of
       Just z -> do
         -- let occurrences = selectingFindOccurrences (Selecting file modul z)
         let occurrences =
-              maybeToList (evalState findBinderForSelection (Selecting file modul z))
+              maybeToList (evalState findBinderForSelection (Selecting file modul z (SPos l c)))
         respond (Spans occurrences)
   Rename fp l c newName -> do
     file <- liftIO (T.readFile (toS fp))
@@ -243,7 +257,7 @@ commandProcessor command respond = case command of
         respond (Message "Didn't match")
       Just z ->
         let
-          result = flip evalState (Selecting file modul z) $ do
+          result = flip evalState (Selecting file modul z (SPos l c)) $ do
             occurrences <- selectingFindOccurrences
             binder' <- findBinderForSelection
             -- traceM ("Occurrences: " <> show occurrences)
@@ -265,13 +279,16 @@ commandProcessor command respond = case command of
 setCursor :: SPos -> State Selecting Bool
 setCursor (SPos l c)= do
   modul <- use selectingModule
-  case (zipper (allMatches modul l c) & within traverse <&> rightmost) of
+  case zipper (allMatches modul l c) & within traverse <&> rightmost of
     Nothing -> pure False
-    Just z -> (selectingMatches .= z) $> True
+    Just z -> do
+      selectingMatches .= z
+      selectingCursor .= SPos l c
+      pure True
 
-getIdentAtPoint :: Selecting -> Maybe Text
-getIdentAtPoint selecting = flip evalState selecting $ do
-  selectionMaybe <- use (selectingMatches . focus)
+getIdentAtPoint :: (MonadReader Selecting m) => m (Maybe Text)
+getIdentAtPoint = do
+  selectionMaybe <- view (selectingMatches . focus)
   pure $ case selectionMaybe of
     BinderMatch _ (P.VarBinder (P.Ident ident)) -> Just ident
     ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> Just ident
@@ -373,15 +390,15 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
                        (P.PositionedDoNotationElement _ _ (P.DoNotationBind binder _)) -> findBindersForInBinder i binder
                        _ -> mempty)
        & listToMaybe
-    P.Case _ alternatives ->
-      alternatives
-       & concatMap P.caseAlternativeBinders
-       & concatMap (findBindersForInBinder i)
-       & listToMaybe
     P.PositionedValue sspan _ expr' ->
       isBoundInMatch i (ExprMatch (sspan^.convertSpan) expr')
     _ ->
       Nothing
+  CaseMatch _ alternative ->
+    alternative
+       & P.caseAlternativeBinders
+       & concatMap (findBindersForInBinder i)
+       & listToMaybe
   _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
@@ -416,7 +433,7 @@ respondSpan :: (MonadState SState m, MonadIO m) => m Response
 respondSpan = do
   s <- get
   case s of
-    SelectingState (Selecting file' _ selections) ->
+    SelectingState (Selecting file' _ selections _) ->
       let
         sp = selections^.focus.matchSpan
       in
@@ -430,6 +447,8 @@ respondSpan = do
               traceShowM expr
             DoNotationMatch _ expr ->
               traceShowM expr
+            CaseMatch _ caseAlt ->
+              traceShowM caseAlt
           pure (Span file' sp)
     Waiting ->
       pure (Message "Gief me da file!")
