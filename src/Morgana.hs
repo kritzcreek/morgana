@@ -80,11 +80,11 @@ convertSpan =
   (\(SSpan fn start end) -> P.SourceSpan (toS fn) (start^. from convertPos) (end^. from convertPos))
 
 data Match where
-  DeclarationMatch :: SSpan -> P.Declaration       -> Match
-  ExprMatch        :: SSpan -> P.Expr              -> Match
-  BinderMatch      :: SSpan -> P.Binder            -> Match
-  DoNotationMatch  :: SSpan -> P.DoNotationElement -> Match
-  CaseMatch        :: SSpan -> P.CaseAlternative   -> Match
+  DeclarationMatch     :: SSpan -> P.Declaration       -> Match
+  ExprMatch            :: SSpan -> P.Expr              -> Match
+  BinderMatch          :: SSpan -> P.Binder            -> Match
+  DoNotationMatch      :: SSpan -> P.DoNotationElement -> Match
+  CaseAlternativeMatch :: SSpan -> P.CaseAlternative   -> Match
   deriving (Show)
 
 -- | Helpers for debug tracing
@@ -112,7 +112,7 @@ showWithoutSpans m = case m of
   ExprMatch _ e -> show (stripPositionsExpr e)
   BinderMatch _ b -> show (stripPositionsBinder b)
   DoNotationMatch _ d -> show d
-  CaseMatch _ c -> show c
+  CaseAlternativeMatch _ c -> show c
 
 matchSpan :: Lens' Match SSpan
 matchSpan = lens getSP setSP
@@ -122,14 +122,14 @@ matchSpan = lens getSP setSP
     getSP (ExprMatch sp _) = sp
     getSP (BinderMatch sp _) = sp
     getSP (DoNotationMatch sp _) = sp
-    getSP (CaseMatch sp _) = sp
+    getSP (CaseAlternativeMatch sp _) = sp
 
     setSP :: Match -> SSpan -> Match
     setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
     setSP (ExprMatch _ d) sp = ExprMatch sp d
     setSP (BinderMatch _ d) sp = BinderMatch sp d
     setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d
-    setSP (CaseMatch _ d) sp = CaseMatch sp d
+    setSP (CaseAlternativeMatch _ d) sp = CaseAlternativeMatch sp d
 
 extractor :: SPos -> P.Declaration -> [Match]
 extractor sp = matcher
@@ -150,14 +150,14 @@ extractor sp = matcher
                | Just start <- view convertSpan <$> (getSpanFromBinder =<< head binders)
                , Just end <- view (convertSpan.ssEnd) <$> (getSpanFromGuardedExpr =<< lastMay body)
                -> let sourceSpan' = SSpan (start^.ssFile) (start^.ssStart) end
-                  in [CaseMatch sourceSpan' ca | matches sp sourceSpan']
+                  in [CaseAlternativeMatch sourceSpan' ca | matches sp sourceSpan']
              _ -> [])
       (\case (P.PositionedDoNotationElement (view convertSpan -> sourceSpan') _ dne) ->
                [DoNotationMatch sourceSpan' dne | matches sp sourceSpan']
              _ -> [])
 
 allMatches :: P.Module -> Int -> Int -> [Match]
-allMatches (P.Module _ _ _ d _) l c = concatMap (extractor (SPos l c)) d
+allMatches (P.Module _ _ _ d _) l c = foldMap (extractor (SPos l c)) d
 
 fromRight :: Either a b -> b
 fromRight = unsafeFromJust . rightToMaybe
@@ -321,6 +321,13 @@ computeChangeset newText spans =
   where
     characterDifference span =  T.length newText - (span^.endColumn - span^.startColumn)
 
+findBindersInGuardedExpr :: Text -> P.GuardedExpr -> [SSpan]
+findBindersInGuardedExpr i (P.GuardedExpr guards _) = foldMap go guards
+  where
+    go (P.ConditionGuard _) = []
+    go (P.PatternGuard binder _) = findBindersForInBinder i binder
+
+
 findBindersFor :: Text -> P.Declaration -> [SSpan]
 findBindersFor ident decl = execState (matcherDecl decl) []
   where
@@ -371,7 +378,7 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
   DeclarationMatch s decl -> case decl of
     P.ValueDeclaration (P.Ident ident ) _ binders _
       | ident == i -> Just (valueDeclarationToBinderSpan s ident)
-      | otherwise -> listToMaybe (concatMap (findBindersForInBinder i) binders)
+      | otherwise -> listToMaybe (foldMap (findBindersForInBinder i) binders)
     P.BoundValueDeclaration binder _ ->
       listToMaybe (findBindersForInBinder i binder)
     P.PositionedDeclaration sspan _ d ->
@@ -384,7 +391,7 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
       listToMaybe (mapMaybe (isValueDecl i) decls)
     P.Do els ->
       els
-       & concatMap (\case
+       & foldMap (\case
                        (P.PositionedDoNotationElement _ _ (P.DoNotationBind binder _)) -> findBindersForInBinder i binder
                        _ -> mempty)
        & listToMaybe
@@ -392,11 +399,16 @@ isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
       isBoundInMatch i (ExprMatch (sspan^.convertSpan) expr')
     _ ->
       Nothing
-  CaseMatch _ alternative ->
-    alternative
+  CaseAlternativeMatch _ alternative ->
+    (alternative
+      & P.caseAlternativeResult
+      & foldMap (findBindersInGuardedExpr i)
+      & listToMaybe)
+    <|>
+    (alternative
        & P.caseAlternativeBinders
-       & concatMap (findBindersForInBinder i)
-       & listToMaybe
+       & foldMap (findBindersForInBinder i)
+       & listToMaybe)
   _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
@@ -445,7 +457,7 @@ respondSpan = do
               traceShowM expr
             DoNotationMatch _ expr ->
               traceShowM expr
-            CaseMatch _ caseAlt ->
+            CaseAlternativeMatch _ caseAlt ->
               traceShowM caseAlt
           pure (Span file' sp)
     Waiting ->

@@ -54,6 +54,16 @@ casePattern = case _ of
   X x -> x
   Y x -> x
 
+caseGuard = case _ of
+  X x | x > 5 -> x
+  Y x -> x
+
+caseGuardPattern = case _ of
+  X y | Just x <- y
+      , wot <- applyFn x
+      -> x
+  Y x -> x
+
 doBinder = do
   x <- y
   x
