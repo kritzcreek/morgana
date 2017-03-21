@@ -71,9 +71,9 @@ commandProcessor command respond = case command of
     _SelectingState.selectingMatches %= tug rightward
     respond =<< respondSpan
   Widen -> do
+    _SelectingState.selectingMatches %= tug leftward
     freeVars <- gets (map freeVariablesInSelection . (preview _SelectingState))
     traceShowM freeVars
-    _SelectingState.selectingMatches %= tug leftward
     respond =<< respondSpan
   FindOccurrences fp l c -> do
     file <- liftIO (T.readFile (toS fp))
@@ -113,7 +113,7 @@ commandProcessor command respond = case command of
                     else
                       do traceM "Something went wrong here" $> False
         in
-          respond (Edits (computeChangeset newName result))
+          respond (Edits (computeRenameChangeset newName result))
 
 setCursor :: SPos -> State Selecting Bool
 setCursor (SPos l c)= do
@@ -144,16 +144,16 @@ selectingFindOccurrences = do
   selectingMatches %= leftmost
   current <- use (selectingMatches . focus)
   case current of
-    DeclarationMatch _ d ->
-      let x = if isBoundIn i d
+    dm@(DeclarationMatch _ d) ->
+      let x = if isJust (isBoundInMatch i dm)
               then findOccurrences i d
               else findOccurrences i d
       in pure x
     _ ->
       pure []
 
-computeChangeset :: Text -> [SSpan] -> [(SSpan, Text)]
-computeChangeset newText spans =
+computeRenameChangeset :: Text -> [SSpan] -> [(SSpan, Text)]
+computeRenameChangeset newText spans =
   List.groupBy ((==) `on` view startLine) spans
   <&> sortOn (view ssStart)
   <&> snd . List.mapAccumL (\offset next -> (offset + characterDifference next, next & columns +~ offset)) 0
@@ -167,21 +167,6 @@ findBindersInGuardedExpr i (P.GuardedExpr guards _) = foldMap go guards
   where
     go (P.ConditionGuard _) = []
     go (P.PatternGuard binder _) = findBindersForInBinder i binder
-
-
-findBindersFor :: Text -> P.Declaration -> [SSpan]
-findBindersFor ident decl = execState (matcherDecl decl) []
-  where
-    (matcherDecl, _, _) = P.everywhereOnValuesTopDownM
-      (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
-               | ident == ident'-> modify (cons (valueDeclarationToBinderSpan
-                                                 (sourceSpan'^.convertSpan)
-                                                 ident)) $> d
-             d -> pure d)
-      pure
-      (\case b@(P.PositionedBinder sourceSpan' _ (P.VarBinder (P.Ident ident')))
-               | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
-             b -> pure b)
 
 findBindersForInBinder :: Text -> P.Binder -> [SSpan]
 findBindersForInBinder ident binder = execState (matcherBinder binder) []
@@ -200,6 +185,35 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
 
+
+-- | Finds all free variables in the current selection if it is an expression
+freeVariablesInSelection :: (MonadReader Selecting m) => m [Text]
+freeVariablesInSelection = do
+  s <- ask
+  currentMatch <- view (selectingMatches.focus)
+  case currentMatch of
+    ExprMatch exprSpan e -> e
+      & findAllVariables
+      & mapMaybe (isFree s exprSpan)
+      & ordNub
+      & pure
+    _ -> pure mempty
+  where
+    isFree selectingState surroundSpan (identSpan, i) = do
+      binderSpan <- evalState (setCursor (identSpan^.ssStart) *> findBinderForSelection) selectingState
+      guard (not (binderSpan `isWithin` surroundSpan))
+      pure i
+    (_, findAllVariables, _, _, _) =
+      P.everythingOnValues (<>)
+      mempty
+      (\case
+          P.PositionedValue sspan _ (P.Var (P.Qualified Nothing (P.Ident i))) ->
+            [(sspan^.convertSpan, i)]
+          _ -> mempty)
+      mempty
+      mempty
+      mempty
+
 valueDeclarationToBinderSpan :: SSpan -> Text -> SSpan
 valueDeclarationToBinderSpan s i =
   s & endLine.~(s^.startLine) & endColumn .~ (s^.startColumn + T.length i)
@@ -211,7 +225,7 @@ findBinderForSelection = do
   z <- use selectingMatches
   case i of
     Just i' ->
-      pure (asum $ (map (isBoundInMatch i') (upward z ^. focus & reverse)))
+      pure (asum (map (isBoundInMatch i') (upward z ^. focus & reverse)))
     Nothing -> traceM "Failed findBinderSelection" *> pure Nothing
 
 isBoundInMatch :: Text -> Match -> Maybe SSpan
@@ -258,9 +272,6 @@ isValueDecl ident (P.PositionedDeclaration sourceSpan _ (P.ValueDeclaration (P.I
 isValueDecl ident (P.PositionedDeclaration _ _ (P.BoundValueDeclaration binder _)) =
   listToMaybe (findBindersForInBinder ident binder)
 isValueDecl _ _ = Nothing
-
-isBoundIn :: Text -> P.Declaration -> Bool
-isBoundIn ident = not . null . findBindersFor ident
 
 findOccurrences :: Text -> P.Declaration -> [SSpan]
 findOccurrences ident = matcher
