@@ -15,10 +15,13 @@ import qualified Language.PureScript as P
 
 
 allMatchesInModule :: P.Module -> Int -> Int -> [Match]
-allMatchesInModule (P.Module _ _ _ declarations _) l c = foldMap (extractor (SPos l c)) declarations
+allMatchesInModule modul l c = allMatchesInModule' modul (SSpan "<morgana>" (SPos l c) (SPos l c))
+
+allMatchesInModule' :: P.Module -> SSpan -> [Match]
+allMatchesInModule' (P.Module _ _ _ declarations _) sp = foldMap extractor declarations
   where
-    extractor :: SPos -> P.Declaration -> [Match]
-    extractor sp = matcher
+    extractor :: P.Declaration -> [Match]
+    extractor = matcher
       where
         (matcher, _, _, _, _) =
           P.everythingOnValues
@@ -48,9 +51,9 @@ unsafeParseModule t = snd . fromRight $ P.parseModuleFromFile identity ("hi", to
     fromRight :: Either a b -> b
     fromRight = unsafeFromJust . rightToMaybe
 
-isWithin :: SPos -> SSpan -> Bool
-isWithin pos span =
-    span^.ssStart <= pos && pos <= span^.ssEnd
+isWithin :: SSpan -> SSpan -> Bool
+isWithin span1 span2 =
+    span2^.ssStart <= span1^.ssStart && span1^.ssEnd <= span2^.ssEnd
 
 commandProcessor :: (MonadState SState m, MonadIO m) => Command -> (Response -> m ()) -> m ()
 commandProcessor command respond = case command of
@@ -68,6 +71,8 @@ commandProcessor command respond = case command of
     _SelectingState.selectingMatches %= tug rightward
     respond =<< respondSpan
   Widen -> do
+    freeVars <- gets (map freeVariablesInSelection . (preview _SelectingState))
+    traceShowM freeVars
     _SelectingState.selectingMatches %= tug leftward
     respond =<< respondSpan
   FindOccurrences fp l c -> do
