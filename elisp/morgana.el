@@ -81,6 +81,12 @@
                newName)))
     (morgana-send cmd)))
 
+(defun morgana-extract-function (newName)
+  "Renames all occurrences for the current selection"
+  (interactive "SNew Name: ")
+  (let ((cmd (format "e %s" newName)))
+    (morgana-send cmd)))
+
 (setq morgana-overlay
       (ov-make 0 0 (current-buffer)))
 (setq morgana-occurrences-overlays '())
@@ -119,7 +125,7 @@
   (process-send-string (get-process "morgana") (s-prepend cmd "\n")))
 
 (defun morgana-process-filter (proc output)
-  (let* ((splitted (s-split " " (s-chomp output)))
+  (let* ((splitted (s-split ";" (s-chomp output)))
          (type (car splitted))
          (content (cdr splitted)))
     (cond
@@ -171,6 +177,7 @@
 (global-set-key (quote [f3]) 'morgana-narrow)
 (global-set-key (quote [f4]) 'morgana-occurrences)
 (global-set-key (quote [f5]) 'morgana-rename)
+(global-set-key (quote [f6]) 'morgana-extract-function)
 
 (provide 'morgana)
 ;;; morgana.el ends here

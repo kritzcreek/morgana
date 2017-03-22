@@ -39,6 +39,7 @@ data Command
   | Narrow
   | FindOccurrences Text Int Int
   | Rename Text Int Int Text
+  | ExtractFunction Text
 
 data Selecting =
   Selecting

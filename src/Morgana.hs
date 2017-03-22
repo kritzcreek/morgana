@@ -72,8 +72,8 @@ commandProcessor command respond = case command of
     respond =<< respondSpan
   Widen -> do
     _SelectingState.selectingMatches %= tug leftward
-    freeVars <- gets (map freeVariablesInSelection . (preview _SelectingState))
-    traceShowM freeVars
+    -- freeVars <- gets (map freeVariablesInSelection . (preview _SelectingState))
+    -- traceShowM freeVars
     respond =<< respondSpan
   FindOccurrences fp l c -> do
     file <- liftIO (T.readFile (toS fp))
@@ -114,6 +114,11 @@ commandProcessor command respond = case command of
                       do traceM "Something went wrong here" $> False
         in
           respond (Edits (computeRenameChangeset newName result))
+  ExtractFunction newName -> do
+    sel <- gets (preview _SelectingState)
+    case sel of
+      Just s -> evalStateT (extractSelection newName) s >>= respond . Edits
+      Nothing -> respond (Message "Select a region")
 
 setCursor :: SPos -> State Selecting Bool
 setCursor (SPos l c)= do
@@ -185,6 +190,28 @@ findBindersForInBinder ident binder = execState (matcherBinder binder) []
                | ident == ident'-> modify (cons (sourceSpan'^.convertSpan)) $> b
              b -> pure b)
 
+extractSelection :: (MonadState Selecting m) => Text -> m [(SSpan, Text)]
+extractSelection newName = do
+  freeVars <- freeVariablesInSelection <$> get
+  traceM $ "Freevars: " <> show freeVars
+  currentMatch <- use (selectingMatches.focus)
+  currentFile <- use selectingFile
+  let oldSpan = currentMatch^.matchSpan
+      oldPlace = (oldSpan, "(" <> newName <> " " <> T.unwords freeVars <> ")")
+      newDecl = newName <> " " <> T.unwords freeVars <> " =\n" <> "  " <> sliceSpan oldSpan currentFile
+  selectingMatches %= leftmost
+  topDecl <- use (selectingMatches.focus.matchSpan)
+  let newPlace = ( SSpan (topDecl^.ssFile) (topDecl^.ssEnd & spLine +~ 1) (topDecl^.ssEnd & spLine +~ 1)
+                 , "\n\n" <> newDecl)
+  pure [oldPlace, newPlace]
+  where
+    sliceSpan span file = file
+      & T.lines
+      & drop (span^.startLine - 1)
+      & take ((span^.endLine - span^.startLine) + 1)
+      & ix 0 %~ T.drop (span^.startColumn - 1)
+      & ix (span^.endLine - span^.startLine) %~ T.take (span^.endColumn)
+      & T.unlines
 
 -- | Finds all free variables in the current selection if it is an expression
 freeVariablesInSelection :: (MonadReader Selecting m) => m [Text]
@@ -194,6 +221,7 @@ freeVariablesInSelection = do
   case currentMatch of
     ExprMatch exprSpan e -> e
       & findAllVariables
+      & \x -> trace ("Allvars: " <> show x :: Text) x
       & mapMaybe (isFree s exprSpan)
       & ordNub
       & pure
@@ -229,7 +257,7 @@ findBinderForSelection = do
     Nothing -> traceM "Failed findBinderSelection" *> pure Nothing
 
 isBoundInMatch :: Text -> Match -> Maybe SSpan
-isBoundInMatch i m = trace ("\n" <> showWithoutSpans m) $ case m of
+isBoundInMatch i m = case m of
   DeclarationMatch s decl -> case decl of
     P.ValueDeclaration (P.Ident ident ) _ binders _
       | ident == i -> Just (valueDeclarationToBinderSpan s ident)
@@ -303,16 +331,17 @@ respondSpan = do
       in
         do
           case selections^.focus of
-            BinderMatch _ binder ->
-              traceShowM binder
-            DeclarationMatch _ decl ->
-              traceShowM decl
+          --   BinderMatch _ binder ->
+          --     traceShowM binder
+          --   DeclarationMatch _ decl ->
+          --     traceShowM decl
             ExprMatch _ expr ->
               traceShowM expr
-            DoNotationMatch _ expr ->
-              traceShowM expr
-            CaseAlternativeMatch _ caseAlt ->
-              traceShowM caseAlt
+          --   DoNotationMatch _ expr ->
+          --     traceShowM expr
+          --   CaseAlternativeMatch _ caseAlt ->
+          --     traceShowM caseAlt
+            _ -> pure ()
           pure (Span file' sp)
     Waiting ->
       pure (Message "Gief me da file!")
@@ -339,6 +368,7 @@ simpleParse t =
     ["o", fp, x, y] -> FindOccurrences fp <$> readMaybe (toS x) <*> readMaybe (toS y)
     ["r", fp, x, y, newName] -> Rename fp <$> readMaybe (toS x) <*> readMaybe (toS y) <*> pure newName
     ["s", fp, x, y] -> Pos fp <$> readMaybe (toS x) <*> readMaybe (toS y)
+    ["e", newName] -> Just (ExtractFunction newName)
     _ -> Nothing
 
 newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
@@ -347,16 +377,16 @@ newtype Emacs a = Emacs { runEmacs :: StateT SState IO a }
 respond' :: (MonadIO m) => Handle -> Response -> m ()
 respond' h r = case r of
   Message t ->
-    liftIO (T.hPutStrLn h ("m: " <> t))
+    liftIO (T.hPutStrLn h ("m:;" <> t))
   Span _ ss ->
-    liftIO (T.hPutStrLn h ("s: " <> answerSS ss))
+    liftIO (T.hPutStrLn h ("s:;" <> answerSS ss))
   Spans sourceSpans ->
-    liftIO (T.hPutStrLn h ("ss: " <> T.unwords (map answerSS sourceSpans)))
+    liftIO (T.hPutStrLn h ("ss:;" <> T.intercalate ";" (map answerSS sourceSpans)))
   Edits edits ->
-    liftIO (T.hPutStrLn h ("ed: " <> T.unwords (map answerEdit edits)))
+    liftIO (T.hPutStrLn h ("ed:;" <> T.intercalate ";" (map answerEdit edits)))
   where
-    answerSS (SSpan _ (SPos x1 y1) (SPos x2 y2)) = T.unwords (map show [x1, y1, x2, y2])
-    answerEdit (ss, text) = answerSS ss <> " " <> text
+    answerSS (SSpan _ (SPos x1 y1) (SPos x2 y2)) = T.intercalate ";" (map show [x1, y1, x2, y2])
+    answerEdit (ss, text) = answerSS ss <> ";" <> text
 
 -- MAIN --
 main :: IO ()
