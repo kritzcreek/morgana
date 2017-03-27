@@ -29,7 +29,7 @@ data SPos = SPos
 
 data Response
   = Message Text
-  | Span Text SSpan
+  | Span SSpan
   | Spans [SSpan]
   | Edits [(SSpan, Text)]
 

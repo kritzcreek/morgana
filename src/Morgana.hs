@@ -45,8 +45,8 @@ allMatchesInModule' (P.Module _ _ _ declarations _) sp = foldMap extractor decla
                   [DoNotationMatch sourceSpan' dne | isWithin sp sourceSpan']
                  _ -> [])
 
-unsafeParseModule :: Text -> P.Module
-unsafeParseModule t = snd . fromRight $ P.parseModuleFromFile identity ("hi", toS t)
+unsafeParseModule :: Text -> Text -> P.Module
+unsafeParseModule t fp = snd . fromRight $ P.parseModuleFromFile identity (toS fp, toS t)
   where
     fromRight :: Either a b -> b
     fromRight = unsafeFromJust . rightToMaybe
@@ -55,11 +55,16 @@ isWithin :: SSpan -> SSpan -> Bool
 isWithin span1 span2 =
     span2^.ssStart <= span1^.ssStart && span1^.ssEnd <= span2^.ssEnd
 
-commandProcessor :: (MonadState SState m, MonadIO m) => Command -> (Response -> m ()) -> m ()
-commandProcessor command respond = case command of
+commandProcessor
+  :: (MonadState SState m, MonadIO m)
+  => (Text -> IO Text)
+  -> (Response -> IO ())
+  -> Command
+  -> m ()
+commandProcessor readF' resp command = case command of
   Pos fp l c -> do
-    file' <- liftIO (T.readFile (toS fp))
-    let modul = unsafeParseModule file'
+    file' <- readF fp
+    let modul = unsafeParseModule file' fp
     case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
@@ -76,8 +81,8 @@ commandProcessor command respond = case command of
     -- traceShowM freeVars
     respond =<< respondSpan
   FindOccurrences fp l c -> do
-    file <- liftIO (T.readFile (toS fp))
-    let modul = unsafeParseModule file
+    file <- readF fp
+    let modul = unsafeParseModule file fp
     case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
@@ -88,8 +93,8 @@ commandProcessor command respond = case command of
               maybeToList (evalState findBinderForSelection (Selecting file modul z (SPos l c)))
         respond (Spans occurrences)
   Rename fp l c newName -> do
-    file <- liftIO (T.readFile (toS fp))
-    let modul = unsafeParseModule file
+    file <- readF fp
+    let modul = unsafeParseModule file fp
     case zipper (allMatchesInModule modul l c) & within traverse <&> rightmost of
       Nothing -> do
         put Waiting
@@ -119,6 +124,9 @@ commandProcessor command respond = case command of
     case sel of
       Just s -> evalStateT (extractSelection newName) s >>= respond . Edits
       Nothing -> respond (Message "Select a region")
+  where
+    readF = liftIO . readF'
+    respond = liftIO . resp
 
 setCursor :: SPos -> State Selecting Bool
 setCursor (SPos l c)= do
@@ -325,7 +333,7 @@ respondSpan :: (MonadState SState m, MonadIO m) => m Response
 respondSpan = do
   s <- get
   case s of
-    SelectingState (Selecting file' _ selections _) ->
+    SelectingState (Selecting _ _ selections _) ->
       let
         sp = selections^.focus.matchSpan
       in
@@ -342,7 +350,7 @@ respondSpan = do
           --   CaseAlternativeMatch _ caseAlt ->
           --     traceShowM caseAlt
             _ -> pure ()
-          pure (Span file' sp)
+          pure (Span sp)
     Waiting ->
       pure (Message "Gief me da file!")
 
@@ -354,7 +362,7 @@ sockHandler sock = do
     line <- liftIO (T.hGetLine h)
     case simpleParse line of
       Just command ->
-        commandProcessor command (respond' h)
+        commandProcessor (T.readFile . toS) (respond' h) command
       Nothing ->
         liftIO (T.hPutStrLn h "Parse failure")
     liftIO (putText line)
@@ -378,7 +386,7 @@ respond' :: (MonadIO m) => Handle -> Response -> m ()
 respond' h r = case r of
   Message t ->
     liftIO (T.hPutStrLn h ("m:;" <> t))
-  Span _ ss ->
+  Span ss ->
     liftIO (T.hPutStrLn h ("s:;" <> answerSS ss))
   Spans sourceSpans ->
     liftIO (T.hPutStrLn h ("ss:;" <> T.intercalate ";" (map answerSS sourceSpans)))
