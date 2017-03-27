@@ -1,3 +1,4 @@
 .stack-work
 .cask
 .DS_Store
+/morgana.cabal

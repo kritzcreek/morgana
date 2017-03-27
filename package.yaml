@@ -1,0 +1,58 @@
+name: morgana
+version: 0.1.0.0
+synopsis: Refactorings for PureScript
+description: Please see README.md
+maintainer: Christoph Hegemann <christoph.hegemann1337@gmail.com>
+license: MIT
+github: kritzcreek/morgana
+category: Development
+extra-source-files:
+  - CHANGELOG.md
+
+ghc-options: -Wall
+
+dependencies:
+  - base >= 4.7 && < 5
+  - protolude
+  - purescript
+  - text
+  - mtl
+  - zippers
+  - network
+  - lens
+
+default-extensions:
+  - OverloadedStrings
+  - TupleSections
+  - GADTs
+  - ViewPatterns
+  - LambdaCase
+  - FlexibleContexts
+  - TypeOperators
+  - TemplateHaskell
+  - GeneralizedNewtypeDeriving
+  - RankNTypes
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Morgana
+    - Morgana.Types
+
+executables:
+  mor:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - morgana
+
+tests:
+  spec:
+    main: Spec.hs
+    source-dirs:
+      - tests
+    dependencies:
+      - stm
+      - morgana
+      - tasty
+      - tasty-hspec
