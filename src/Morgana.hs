@@ -389,8 +389,8 @@ respond' h r = case r of
     answerEdit (ss, text) = answerSS ss <> ";" <> text
 
 -- MAIN --
-main :: IO ()
-main = withSocketsDo $ do
+morgana :: IO ()
+morgana = withSocketsDo $ do
     args <- getArgs
     let port = fromIntegral $ fromMaybe 5678 (readMaybe =<< headMay args :: Maybe Int)
     sock <- listenOn $ PortNumber port
