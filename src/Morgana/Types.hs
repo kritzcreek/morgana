@@ -9,7 +9,7 @@ import qualified Data.Text           as T
 import qualified Language.PureScript as P
 
 data Match where
-  DeclarationMatch     :: SSpan -> P.Declaration       -> Match
+  DeclarationMatch     :: P.Declaration                -> Match
   ExprMatch            :: SSpan -> P.Expr              -> Match
   BinderMatch          :: SSpan -> P.Binder            -> Match
   DoNotationMatch      :: SSpan -> P.DoNotationElement -> Match
@@ -103,19 +103,6 @@ convertSpan =
   (\(P.SourceSpan fn start end) -> (SSpan (T.pack fn) (start^.convertPos) (end^.convertPos)))
   (\(SSpan fn start end) -> P.SourceSpan (toS fn) (start^. from convertPos) (end^. from convertPos))
 
--- | Helpers for debug tracing
-stripPositionsDecl :: P.Declaration -> P.Declaration
-stripPositionsBinder :: P.Binder -> P.Binder
-stripPositionsExpr :: P.Expr -> P.Expr
-(stripPositionsDecl, stripPositionsExpr, stripPositionsBinder) = P.everywhereOnValues
-      (\case (P.PositionedDeclaration _ _ d) -> d
-             d -> d)
-      (\case e@(P.PositionedValue _ _ (P.Let{})) -> e
-             (P.PositionedValue _ _ e) -> e
-             e -> e)
-      (\case (P.PositionedBinder _ _ b) -> b
-             b -> b)
-
 instance Eq Match where
   (==) = (==) `on` view matchSpan
 
@@ -124,9 +111,9 @@ instance Ord Match where
 
 showWithoutSpans :: Match -> Text
 showWithoutSpans m = case m of
-  DeclarationMatch _ d -> show (stripPositionsDecl d)
-  ExprMatch _ e -> show (stripPositionsExpr e)
-  BinderMatch _ b -> show (stripPositionsBinder b)
+  DeclarationMatch d -> show d
+  ExprMatch _ e -> show e
+  BinderMatch _ b -> show b
   DoNotationMatch _ d -> show d
   CaseAlternativeMatch _ c -> show c
 
@@ -134,14 +121,15 @@ matchSpan :: Lens' Match SSpan
 matchSpan = lens getSP setSP
   where
     getSP :: Match -> SSpan
-    getSP (DeclarationMatch sp _) = sp
+    getSP (DeclarationMatch d) = P.declSourceSpan d ^. convertSpan
     getSP (ExprMatch sp _) = sp
     getSP (BinderMatch sp _) = sp
     getSP (DoNotationMatch sp _) = sp
     getSP (CaseAlternativeMatch sp _) = sp
 
     setSP :: Match -> SSpan -> Match
-    setSP (DeclarationMatch _ d) sp = DeclarationMatch sp d
+    -- TODO: Make a proper setter, or don't actually provide a full lens
+    setSP (DeclarationMatch d) _ = DeclarationMatch d
     setSP (ExprMatch _ d) sp = ExprMatch sp d
     setSP (BinderMatch _ d) sp = BinderMatch sp d
     setSP (DoNotationMatch _ d) sp = DoNotationMatch sp d

@@ -26,9 +26,9 @@ allMatchesInModule' (P.Module _ _ _ declarations _) sp = foldMap extractor decla
         (matcher, _, _, _, _) =
           P.everythingOnValues
           (<>)
-          (\case (P.PositionedDeclaration (view convertSpan -> sourceSpan') _ d) ->
-                  [DeclarationMatch sourceSpan' d | isWithin sp sourceSpan']
-                 _ -> [])
+          (\d ->
+              let sourceSpan = P.declSourceSpan d ^. convertSpan
+              in [DeclarationMatch d | isWithin sp sourceSpan])
           (\case (P.PositionedValue (view convertSpan -> sourceSpan') _ e) ->
                   [ExprMatch sourceSpan' e | isWithin sp sourceSpan']
                  _ -> [])
@@ -144,7 +144,7 @@ getIdentAtPoint = do
   pure $ case selectionMaybe of
     BinderMatch _ (P.VarBinder (P.Ident ident)) -> Just ident
     ExprMatch _ (P.Var (P.Qualified Nothing (P.Ident ident))) -> Just ident
-    DeclarationMatch _ (P.ValueDeclaration (P.Ident ident) _ _ _) -> Just ident
+    DeclarationMatch (P.ValueDeclaration _ (P.Ident ident) _ _ _) -> Just ident
     _ -> Nothing
 
 selectingFindOccurrences :: State Selecting [SSpan]
@@ -157,7 +157,7 @@ selectingFindOccurrences = do
   selectingMatches %= leftmost
   current <- use (selectingMatches . focus)
   case current of
-    dm@(DeclarationMatch _ d) ->
+    dm@(DeclarationMatch d) ->
       let x = if isJust (isBoundInMatch i dm)
               then findOccurrences i d
               else findOccurrences i d
@@ -185,12 +185,12 @@ findBindersForInBinder :: Text -> P.Binder -> [SSpan]
 findBindersForInBinder ident binder = execState (matcherBinder binder) []
   where
     (_, _, matcherBinder) = P.everywhereOnValuesTopDownM
-      (\case d@(P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _))
+      (\case d@(P.ValueDeclaration (sourceSpan, _) (P.Ident ident') _ _ _)
                | ident == ident'-> modify (cons
                                            (valueDeclarationToBinderSpan
-                                            (sourceSpan'^.convertSpan)
+                                            (sourceSpan^.convertSpan)
                                             ident)) $> d
-             d@(P.ValueDeclaration _ _ binders _) -> do
+             d@(P.ValueDeclaration _ _ _ binders _) -> do
                modify ((++) (foldMap (findBindersForInBinder ident) binders)) $> d
              d -> pure d)
       pure
@@ -266,15 +266,14 @@ findBinderForSelection = do
 
 isBoundInMatch :: Text -> Match -> Maybe SSpan
 isBoundInMatch i m = case m of
-  DeclarationMatch s decl -> case decl of
-    P.ValueDeclaration (P.Ident ident ) _ binders _
-      | ident == i -> Just (valueDeclarationToBinderSpan s ident)
+  DeclarationMatch decl -> case decl of
+    P.ValueDeclaration (sourceSpan, _) (P.Ident ident ) _ binders _
+      | ident == i -> Just (valueDeclarationToBinderSpan (sourceSpan^.convertSpan) ident)
       | otherwise -> listToMaybe (foldMap (findBindersForInBinder i) binders)
-    P.BoundValueDeclaration binder _ ->
+    P.BoundValueDeclaration _ binder _ ->
       listToMaybe (findBindersForInBinder i binder)
-    P.PositionedDeclaration sspan _ d ->
-      isBoundInMatch i (DeclarationMatch (sspan^.convertSpan) d)
-    _ -> Nothing
+    d ->
+      isBoundInMatch i (DeclarationMatch d)
   ExprMatch _ expr -> case expr of
     P.Abs binder _ ->
       listToMaybe (findBindersForInBinder i binder)
@@ -303,9 +302,9 @@ isBoundInMatch i m = case m of
   _ -> Nothing
 
 isValueDecl :: Text -> P.Declaration -> Maybe SSpan
-isValueDecl ident (P.PositionedDeclaration sourceSpan _ (P.ValueDeclaration (P.Ident i) _ _ _))
+isValueDecl ident (P.ValueDeclaration (sourceSpan, _) (P.Ident i) _ _ _)
   | i == ident = Just (valueDeclarationToBinderSpan (sourceSpan^.convertSpan) i)
-isValueDecl ident (P.PositionedDeclaration _ _ (P.BoundValueDeclaration binder _)) =
+isValueDecl ident (P.BoundValueDeclaration _ binder _) =
   listToMaybe (findBindersForInBinder ident binder)
 isValueDecl _ _ = Nothing
 
@@ -315,8 +314,8 @@ findOccurrences ident = matcher
     (matcher, _, _, _, _) =
       P.everythingOnValues
       (<>)
-      (\case (P.PositionedDeclaration sourceSpan' _ (P.ValueDeclaration (P.Ident ident') _ _ _)) ->
-               [valueDeclarationToBinderSpan (sourceSpan'^.convertSpan) ident | ident == ident']
+      (\case (P.ValueDeclaration (sourceSpan, _) (P.Ident ident') _ _ _) ->
+               [valueDeclarationToBinderSpan (sourceSpan^.convertSpan) ident | ident == ident']
              _ -> [])
       (\case (P.PositionedValue sourceSpan' _ (P.Var (P.Qualified Nothing (P.Ident ident')))) ->
                [sourceSpan'^.convertSpan | ident == ident']
